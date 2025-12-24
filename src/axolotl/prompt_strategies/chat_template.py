@@ -278,9 +278,17 @@ class ChatTemplateStrategy(PromptTokenizingStrategy):
         train_on_eot: str | None = None,
         eot_tokens: list[str] | None = None,
         split_thinking: bool | None = False,
+        cfg = None,
     ):
         super().__init__(prompter, tokenizer, train_on_inputs, sequence_len)
         self.prompter: ChatTemplatePrompter = prompter
+        self.cfg = cfg
+
+        # Dynamically determine channel_loss_field to avoid hardcoding
+        self.channel_loss_field = None
+        if cfg and cfg.get("enable_channel_loss"):
+            self.channel_loss_field = cfg.get("channel_loss_field", "channel")
+            LOG.info(f"ChatTemplateStrategy: Using channel field '{self.channel_loss_field}' for Channel Loss")
 
         self.roles_to_train = []
         if roles_to_train:
@@ -455,6 +463,10 @@ class ChatTemplateStrategy(PromptTokenizingStrategy):
 
             tokenized_prompt["labels"] = labels
 
+            # Preserve channel field for channel loss tracking (dynamic field name)
+            if self.channel_loss_field and self.channel_loss_field in prompt:
+                tokenized_prompt[self.channel_loss_field] = prompt[self.channel_loss_field]
+
             return tokenized_prompt
 
         turns = self.get_conversation_thread(prompt)
@@ -576,11 +588,17 @@ class ChatTemplateStrategy(PromptTokenizingStrategy):
 
         LOG.debug(f"Final labels: {labels}")
 
-        return {
+        result = {
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": [1] * len(input_ids),
         }
+
+        # Preserve channel field for channel loss tracking (dynamic field name)
+        if self.channel_loss_field and self.channel_loss_field in prompt:
+            result[self.channel_loss_field] = prompt[self.channel_loss_field]
+
+        return result
 
     def find_first_eos_token(self, input_ids, start_idx):
         eos_token_id = self.tokenizer.eos_token_id
@@ -969,6 +987,7 @@ class StrategyLoader:
             "train_on_eot": ds_cfg.get("train_on_eot", None),
             "eot_tokens": cfg.get("eot_tokens", None),  # loads from cfg, not ds_cfg
             "split_thinking": ds_cfg.get("split_thinking", False),
+            "cfg": cfg,  # Pass cfg for channel_loss_field access
         }
 
     def __call__(

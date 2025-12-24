@@ -95,13 +95,13 @@ class CustomSwanLabCallback(TrainerCallback):
         """Called when logging metrics"""
         if not state.is_world_process_zero:
             return control
-        
+
         if not self._initialized:
             self.setup()
-        
+
         if not self._initialized or logs is None:
             return control
-        
+
         # Log metrics to SwanLab
         try:
             # Filter out non-numeric values and prepare for logging
@@ -110,7 +110,7 @@ class CustomSwanLabCallback(TrainerCallback):
                 if isinstance(value, (int, float)):
                     # Use step from state
                     metrics[key] = value
-            
+
             if metrics and state.global_step is not None:
                 self.swanlab.log(metrics, step=state.global_step)
         except Exception as err:

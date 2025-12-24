@@ -85,8 +85,10 @@ def patch_compute_loss_for_channel_loss(
         # Extract channel (side input, not passed to model)
         channels = inputs.pop("channel", None)
 
-        # Remove task_type if it exists (shouldn't be passed to model)
-        inputs.pop("task_type", None)
+        # Remove channel_loss_field if it exists (shouldn't be passed to model)
+        # Use configured field name to avoid hardcoding
+        channel_field = cfg.get("channel_loss_field", "channel")
+        inputs.pop(channel_field, None)
 
         # Get tensors needed for channel statistics (before they might be modified)
         labels = inputs.get("labels")

@@ -120,7 +120,7 @@ def get_dataset_wrapper(
         dataset_config.type, tokenizer, cfg, dataset_config, processor=processor
     )
     if dataset_strategy:
-        return _handle_loaded_strategy(dataset_strategy, dataset, dataset_kwargs)
+        return _handle_loaded_strategy(dataset_strategy, dataset, dataset_kwargs, cfg)
 
     # Known dataset types with specific handling
     if dataset_base_type in DATASET_HANDLERS:
@@ -157,6 +157,7 @@ def _handle_custom_dataset_type(
     dataset_wrapper = wrap_dataset_for_tokenized_prompt(
         dataset_strategy,
         dataset,
+        cfg=cfg,
         **dataset_kwargs,
     )
     return dataset_wrapper, dataset_prompter
@@ -214,6 +215,7 @@ def _handle_loaded_strategy(
     dataset_strategy: PromptTokenizingStrategy | DatasetWrappingStrategy,
     dataset: Dataset | IterableDataset,
     dataset_kwargs: dict[str, Any],
+    cfg = None,
 ) -> tuple[Dataset | IterableDataset, Prompter | None]:
     """Handle a dataset with a strategy loaded from the registry."""
     if isinstance(dataset_strategy, DatasetWrappingStrategy):

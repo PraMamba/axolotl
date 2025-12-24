@@ -113,6 +113,7 @@ def load(tokenizer, cfg, ds_cfg: Optional[Dict[str, Any]] = None):
         "sequence_len": cfg.sequence_len,
         "roles_to_train": ds_cfg.get("roles_to_train", []),
         "train_on_eos": ds_cfg.get("train_on_eos", None),
+        "cfg": cfg,  # Pass cfg for channel_loss_field access
     }
 
     strategy = BTChatTemplateStrategy(
