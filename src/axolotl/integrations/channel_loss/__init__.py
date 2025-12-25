@@ -88,9 +88,38 @@ class ChannelLossPlugin(BasePlugin):
 
         LOG.info("Channel Loss Plugin: Registering...")
 
-        # Check for incompatible plugins
-        # Cut Cross Entropy does not materialize logits, which Channel Loss needs
-        # We MUST disable it by setting the flag to False
+        # === Hard Conflicts: Features that prevent Channel Loss from working ===
+        # These will raise ValueError to fail early with clear error messages
+
+        # 1. Liger Fused Linear Cross Entropy (FLCE)
+        if cfg.get("liger_fused_linear_cross_entropy"):
+            raise ValueError(
+                "Channel Loss is incompatible with liger_fused_linear_cross_entropy.\n\n"
+                "Reason: Liger FLCE skips logits materialization in training mode (skip_logits=True)\n"
+                "to save memory, but Channel Loss requires access to logits for per-channel statistics.\n\n"
+                "Solutions:\n"
+                "  1. Use 'chunked_cross_entropy: true' instead (compatible, saves memory)\n"
+                "  2. Use 'liger_cross_entropy: true' (non-fused, partial optimization)\n"
+                "  3. Disable Channel Loss if Liger FLCE is critical for your memory budget\n\n"
+                "See: specs/001-channel-loss-compatibility-audit.md for details"
+            )
+
+        # 2. Knowledge Distillation (KD) Trainer
+        if cfg.get("kd_trainer"):
+            raise ValueError(
+                "Channel Loss is incompatible with KD trainer.\n\n"
+                "Reason: KD's compute_loss() method does not support return_outputs=True,\n"
+                "preventing Channel Loss from accessing model outputs and logits.\n\n"
+                "Solutions:\n"
+                "  1. Disable Channel Loss for KD training\n"
+                "  2. Wait for KD Trainer fix (track issue in GitHub)\n"
+                "  3. Use standard SFT training if Channel Loss is required\n\n"
+                "See: specs/001-channel-loss-compatibility-audit.md for details"
+            )
+
+        # === Soft Conflicts: Cut Cross Entropy (auto-disable) ===
+        # CCE is incompatible, but we can auto-disable it for user convenience
+
         cce_plugin = "axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin"
         plugins = cfg.get("plugins", [])
 
@@ -104,6 +133,19 @@ class ChannelLossPlugin(BasePlugin):
             # Setting this to False prevents CCE from being applied
             cfg["cut_cross_entropy"] = False
             LOG.info("Channel Loss Plugin: Disabled Cut Cross Entropy (set cut_cross_entropy=False)")
+
+        # === Semantic Warnings: RL Training ===
+        # Technically compatible but semantically questionable
+
+        rl_types = ["dpo", "kto", "orpo", "simpo", "grpo"]
+        current_rl = cfg.get("rl")
+        if current_rl and current_rl.lower() in rl_types:
+            LOG.warning(
+                f"Channel Loss enabled with RL training mode: {current_rl.upper()}\n"
+                f"Note: RL training uses sample-level preference loss, not per-token causal loss.\n"
+                f"Per-channel statistics may not be meaningful for this training paradigm.\n"
+                f"Consider whether channel-level monitoring makes sense for your use case."
+            )
 
         # Extract channel from dataset configs
         # This is necessary because SFTDataset schema doesn't have 'channel' field

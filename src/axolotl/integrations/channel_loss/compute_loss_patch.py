@@ -64,6 +64,9 @@ def patch_compute_loss_for_channel_loss(
     )
     prefix: str = cfg.get("channel_loss_prefix", "loss_")
 
+    # Initialize warning flag on trainer instance (to warn only once)
+    trainer._channel_loss_warned_no_logits = False
+
     def compute_loss_with_channel(
         model,
         inputs: Dict[str, Any],
@@ -109,23 +112,42 @@ def patch_compute_loss_for_channel_loss(
             outputs = None
 
         # Compute channel statistics (observer-only)
-        if (
-            channels is not None
-            and labels is not None
-            and outputs is not None
+        # Check if we have the required logits
+        has_logits = (
+            outputs is not None
             and hasattr(outputs, "logits")
             and outputs.logits is not None
-        ):
-            _update_channel_stats(
-                trainer=trainer,
-                logits=outputs.logits,
-                labels=labels,
-                channels=channels,
-                position_ids=position_ids,
-                attention_mask=attention_mask,
-                segment_mode=segment_mode,
-                prefix=prefix,
-            )
+        )
+
+        if channels is not None and labels is not None:
+            if has_logits:
+                # Happy path: compute channel statistics
+                _update_channel_stats(
+                    trainer=trainer,
+                    logits=outputs.logits,
+                    labels=labels,
+                    channels=channels,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    segment_mode=segment_mode,
+                    prefix=prefix,
+                )
+            else:
+                # Runtime detection: logits are missing
+                # This can happen if an incompatible optimization is enabled
+                # despite passing compile-time checks
+                if not trainer._channel_loss_warned_no_logits:
+                    LOG.error(
+                        "Channel Loss: No logits available from compute_loss().\n"
+                        "This usually means an incompatible optimization is enabled.\n"
+                        "Possible causes:\n"
+                        "  - Liger FLCE with skip_logits=True (training mode)\n"
+                        "  - Custom Trainer not supporting return_outputs=True\n"
+                        "  - Model forward() not returning logits\n"
+                        "Result: Channel statistics will NOT be recorded.\n"
+                        "This warning will only be shown once."
+                    )
+                    trainer._channel_loss_warned_no_logits = True
 
         return (loss, outputs) if return_outputs else loss
 

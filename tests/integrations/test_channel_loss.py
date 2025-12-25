@@ -352,3 +352,472 @@ class TestArgsModels:
         assert mixin.channel_loss_field == "channel"
         assert mixin.channel_loss_prefix == "loss_"
         assert mixin.channel_loss_segment == "auto"
+
+
+class TestConflictDetection:
+    """Tests for compatibility conflict detection added in Phase 3."""
+
+    def test_liger_flce_conflict_raises_error(self):
+        """Test that Liger FLCE raises ValueError when combined with Channel Loss."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": True,
+            "liger_fused_linear_cross_entropy": True,
+            "plugins": ["axolotl.integrations.channel_loss.ChannelLossPlugin"],
+        }
+
+        with pytest.raises(ValueError, match="incompatible with liger_fused_linear_cross_entropy"):
+            plugin.register(cfg)
+
+    def test_kd_trainer_conflict_raises_error(self):
+        """Test that KD Trainer raises ValueError when combined with Channel Loss."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": True,
+            "kd_trainer": True,
+            "plugins": ["axolotl.integrations.channel_loss.ChannelLossPlugin"],
+        }
+
+        with pytest.raises(ValueError, match="incompatible with KD trainer"):
+            plugin.register(cfg)
+
+    def test_liger_flce_error_message_includes_solutions(self):
+        """Test that Liger FLCE error provides solution alternatives."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": True,
+            "liger_fused_linear_cross_entropy": True,
+        }
+
+        with pytest.raises(ValueError) as exc_info:
+            plugin.register(cfg)
+
+        error_msg = str(exc_info.value)
+        # Check that error message includes helpful solutions
+        assert "chunked_cross_entropy" in error_msg
+        assert "liger_cross_entropy" in error_msg
+        assert "skip_logits" in error_msg
+
+    def test_kd_error_message_includes_solutions(self):
+        """Test that KD Trainer error provides solution alternatives."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": True,
+            "kd_trainer": True,
+        }
+
+        with pytest.raises(ValueError) as exc_info:
+            plugin.register(cfg)
+
+        error_msg = str(exc_info.value)
+        # Check that error message explains the problem
+        assert "return_outputs" in error_msg
+        assert "compute_loss" in error_msg
+
+    def test_rl_training_warning(self, caplog):
+        """Test that RL training triggers a warning but doesn't fail."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        # Test each RL type
+        rl_types = ["dpo", "kto", "orpo", "simpo", "grpo"]
+
+        for rl_type in rl_types:
+            caplog.clear()
+
+            cfg = {
+                "enable_channel_loss": True,
+                "rl": rl_type,
+                "datasets": [],
+            }
+
+            # Should not raise, only warn
+            plugin.register(cfg)
+
+            # Check warning was logged
+            assert any("sample-level preference loss" in rec.message for rec in caplog.records)
+            assert any(rl_type.upper() in rec.message for rec in caplog.records)
+
+    def test_cce_auto_disable_behavior(self, caplog):
+        """Test that CCE is auto-disabled with appropriate logging."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": True,
+            "plugins": [
+                "axolotl.integrations.cut_cross_entropy.CutCrossEntropyPlugin",
+                "axolotl.integrations.channel_loss.ChannelLossPlugin",
+            ],
+            "datasets": [],
+        }
+
+        plugin.register(cfg)
+
+        # CCE should be disabled
+        assert cfg.get("cut_cross_entropy") is False
+
+        # Check warning was logged
+        assert any("Disabling Cut Cross Entropy" in rec.message for rec in caplog.records)
+
+    def test_no_conflicts_when_disabled(self):
+        """Test that conflicts are not checked when Channel Loss is disabled."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": False,  # Disabled
+            "liger_fused_linear_cross_entropy": True,  # Would conflict if enabled
+            "kd_trainer": True,  # Would conflict if enabled
+        }
+
+        # Should not raise because Channel Loss is disabled
+        plugin.register(cfg)
+
+    def test_multiple_conflicts_first_one_raises(self):
+        """Test that when multiple conflicts exist, the first one raises."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        cfg = {
+            "enable_channel_loss": True,
+            "liger_fused_linear_cross_entropy": True,  # First check
+            "kd_trainer": True,  # Second check
+        }
+
+        # Should raise for Liger FLCE (first check)
+        with pytest.raises(ValueError, match="liger_fused_linear_cross_entropy"):
+            plugin.register(cfg)
+
+    def test_compatible_configurations_pass(self):
+        """Test that compatible configurations don't raise errors."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        # Test chunked_cross_entropy (compatible)
+        cfg = {
+            "enable_channel_loss": True,
+            "chunked_cross_entropy": True,
+            "datasets": [],
+        }
+        plugin.register(cfg)  # Should not raise
+
+        # Test sample_packing (compatible)
+        cfg = {
+            "enable_channel_loss": True,
+            "sample_packing": True,
+            "datasets": [],
+        }
+        plugin.register(cfg)  # Should not raise
+
+        # Test deepspeed (compatible)
+        cfg = {
+            "enable_channel_loss": True,
+            "deepspeed": "deepspeed_configs/zero3.json",
+            "datasets": [],
+        }
+        plugin.register(cfg)  # Should not raise
+
+
+class TestCompatibleFeatures:
+    """Integration tests for features that should work with Channel Loss."""
+
+    def test_chunked_cross_entropy_integration(self):
+        """Test that Channel Loss works with Chunked Cross Entropy."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "chunked_cross_entropy": True,
+            "chunk_size": 8192,
+            "datasets": [],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+        # Verify chunked_cross_entropy is preserved
+        assert cfg["chunked_cross_entropy"] is True
+        assert cfg["chunk_size"] == 8192
+
+    def test_sample_packing_integration(self):
+        """Test that Channel Loss works with sample packing."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "sample_packing": True,
+            "channel_loss_segment": "auto",
+            "datasets": [{"path": "test.jsonl", "channel": "test"}],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+        # Verify channel was extracted
+        assert "_channel_loss_dataset_channels" in cfg
+        assert cfg["_channel_loss_dataset_channels"] == ["test"]
+
+    def test_lora_qlora_integration(self):
+        """Test that Channel Loss works with LoRA/QLoRA."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "adapter": "qlora",
+            "lora_r": 32,
+            "lora_alpha": 16,
+            "load_in_4bit": True,
+            "datasets": [],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+    def test_distributed_training_integration(self):
+        """Test that Channel Loss registers with distributed training configs."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+
+        # FSDP
+        cfg_fsdp = {
+            "enable_channel_loss": True,
+            "fsdp": ["full_shard", "auto_wrap"],
+            "fsdp_config": {"fsdp_transformer_layer_cls_to_wrap": "LlamaDecoderLayer"},
+            "datasets": [],
+        }
+        plugin.register(cfg_fsdp)  # Should not raise
+
+        # DeepSpeed ZeRO-2
+        plugin2 = ChannelLossPlugin()
+        cfg_ds = {
+            "enable_channel_loss": True,
+            "deepspeed": "deepspeed_configs/zero2.json",
+            "datasets": [],
+        }
+        plugin2.register(cfg_ds)  # Should not raise
+
+    def test_gradient_checkpointing_integration(self):
+        """Test that Channel Loss works with gradient checkpointing."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "gradient_checkpointing": True,
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
+            "datasets": [],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+    def test_flash_attention_integration(self):
+        """Test that Channel Loss works with Flash Attention."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "flash_attention": True,
+            "datasets": [],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+    def test_liger_non_fused_integration(self):
+        """Test that Channel Loss works with non-fused Liger CE."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "liger_cross_entropy": True,  # Non-fused version
+            "datasets": [],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+        # Verify liger_cross_entropy is preserved
+        assert cfg["liger_cross_entropy"] is True
+
+
+class TestRuntimeDetection:
+    """Tests for runtime detection of missing logits."""
+
+    def test_runtime_logits_missing_detection(self):
+        """Test that missing logits at runtime triggers warning."""
+        import torch
+        from unittest.mock import Mock
+        from axolotl.integrations.channel_loss.compute_loss_patch import (
+            patch_compute_loss_for_channel_loss,
+        )
+
+        # Create mock trainer
+        trainer = Mock()
+        trainer.model = Mock()
+        trainer.model.training = True
+        trainer._channel_loss_warned_no_logits = False
+        trainer._channel_loss_stats = {
+            "train": {},
+            "eval": {},
+        }
+
+        # Mock original compute_loss that returns None outputs
+        def mock_compute_loss(model, inputs, return_outputs=False, num_items_in_batch=None):
+            loss = torch.tensor(1.0)
+            if return_outputs:
+                # Return outputs without logits (simulating incompatible optimization)
+                outputs = Mock()
+                outputs.logits = None
+                return loss, outputs
+            return loss
+
+        trainer.compute_loss = mock_compute_loss
+
+        # Apply the patch
+        cfg = {
+            "channel_loss_segment": "auto",
+            "channel_loss_prefix": "loss_",
+            "channel_loss_field": "channel",
+        }
+        patch_compute_loss_for_channel_loss(trainer, cfg)
+
+        # Test inputs with channel
+        inputs = {
+            "labels": torch.tensor([[1, 2, 3]]),
+            "channel": ["test_channel"],
+        }
+
+        # Call patched compute_loss
+        result = trainer.compute_loss(trainer.model, inputs, return_outputs=False)
+
+        # Verify warning flag was set
+        assert trainer._channel_loss_warned_no_logits is True
+        assert isinstance(result, torch.Tensor)
+
+    def test_runtime_detection_only_warns_once(self):
+        """Test that runtime detection only warns once per trainer."""
+        import torch
+        from unittest.mock import Mock
+        from axolotl.integrations.channel_loss.compute_loss_patch import (
+            patch_compute_loss_for_channel_loss,
+        )
+
+        trainer = Mock()
+        trainer.model = Mock()
+        trainer.model.training = True
+        trainer._channel_loss_warned_no_logits = False
+        trainer._channel_loss_stats = {"train": {}, "eval": {}}
+
+        def mock_compute_loss(model, inputs, return_outputs=False, num_items_in_batch=None):
+            loss = torch.tensor(1.0)
+            if return_outputs:
+                outputs = Mock()
+                outputs.logits = None
+                return loss, outputs
+            return loss
+
+        trainer.compute_loss = mock_compute_loss
+
+        cfg = {
+            "channel_loss_segment": "auto",
+            "channel_loss_prefix": "loss_",
+            "channel_loss_field": "channel",
+        }
+        patch_compute_loss_for_channel_loss(trainer, cfg)
+
+        inputs = {
+            "labels": torch.tensor([[1, 2, 3]]),
+            "channel": ["test_channel"],
+        }
+
+        # First call - should warn
+        trainer.compute_loss(trainer.model, inputs, return_outputs=False)
+        assert trainer._channel_loss_warned_no_logits is True
+
+        # Second call - warning flag already set, should not warn again
+        # (The actual logging happens inside the function, we just verify the flag)
+        trainer.compute_loss(trainer.model, inputs, return_outputs=False)
+        assert trainer._channel_loss_warned_no_logits is True
+
+    def test_happy_path_with_logits_available(self):
+        """Test normal operation when logits are available."""
+        import torch
+        from unittest.mock import Mock
+        from collections import defaultdict
+        from axolotl.integrations.channel_loss.compute_loss_patch import (
+            patch_compute_loss_for_channel_loss,
+        )
+
+        trainer = Mock()
+        trainer.model = Mock()
+        trainer.model.training = True
+        trainer._channel_loss_warned_no_logits = False
+        trainer._channel_loss_stats = {
+            "train": defaultdict(lambda: {"sum": 0.0, "count": 0}),
+            "eval": defaultdict(lambda: {"sum": 0.0, "count": 0}),
+        }
+
+        # Mock compute_loss that returns proper logits
+        def mock_compute_loss(model, inputs, return_outputs=False, num_items_in_batch=None):
+            loss = torch.tensor(2.5)
+            if return_outputs:
+                outputs = Mock()
+                # Create proper logits tensor
+                batch_size = inputs["labels"].shape[0]
+                seq_len = inputs["labels"].shape[1]
+                vocab_size = 32000
+                outputs.logits = torch.randn(batch_size, seq_len, vocab_size)
+                return loss, outputs
+            return loss
+
+        trainer.compute_loss = mock_compute_loss
+
+        cfg = {
+            "channel_loss_segment": "auto",
+            "channel_loss_prefix": "loss_",
+            "channel_loss_field": "channel",
+        }
+        patch_compute_loss_for_channel_loss(trainer, cfg)
+
+        # Test with proper inputs
+        inputs = {
+            "labels": torch.tensor([[1, 2, 3, -100]]),
+            "channel": ["math"],
+            "attention_mask": torch.tensor([[1, 1, 1, 0]]),
+        }
+
+        # Call should succeed
+        result = trainer.compute_loss(trainer.model, inputs, return_outputs=False)
+
+        # Should not have warned
+        assert trainer._channel_loss_warned_no_logits is False
+        assert isinstance(result, torch.Tensor)
+
+        # Channel stats should have been updated
+        assert "loss_math" in trainer._channel_loss_stats["train"]
+        assert trainer._channel_loss_stats["train"]["loss_math"]["count"] > 0
