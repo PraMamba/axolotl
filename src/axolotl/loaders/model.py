@@ -226,6 +226,11 @@ class ModelLoader:
             self.model = self.model.merge_and_unload()
 
         self._configure_experts_implementation()
+
+        # Attach device_mesh to model if context parallelism is enabled
+        if hasattr(self, "device_mesh") and self.device_mesh is not None:
+            self.model.device_mesh = self.device_mesh
+
         self._apply_activation_checkpointing()
         self._resize_token_embeddings()
         self._adjust_model_config()

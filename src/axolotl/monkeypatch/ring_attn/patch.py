@@ -32,6 +32,7 @@ from axolotl.utils.schemas.enums import RingAttnFunc
 LOG = get_logger(__name__)
 
 RING_ATTN_GROUP = None
+RING_ATTN_CU_SEQLENS = None
 
 
 def get_ring_attn_group() -> dist.ProcessGroup:
@@ -45,6 +46,19 @@ def set_ring_attn_group(ring_attn_group: dist.ProcessGroup | None):
     """Setter for ring attention group on this rank."""
     global RING_ATTN_GROUP
     RING_ATTN_GROUP = ring_attn_group
+
+
+def get_ring_attn_cu_seqlens() -> torch.Tensor:
+    """Get the most recently computed global cu_seqlens for the current batch.
+
+    This is populated by `update_ring_attn_params()` before the model forward pass.
+    """
+    if RING_ATTN_CU_SEQLENS is None:
+        raise RuntimeError(
+            "update_ring_attn_params() has not been called yet; "
+            "cu_seqlens are unavailable for this forward pass."
+        )
+    return RING_ATTN_CU_SEQLENS
 
 
 def create_ring_flash_attention_forward(
@@ -224,4 +238,6 @@ def update_ring_attn_params(position_ids: torch.Tensor | None):
 
     cu_seqlens, _ = get_cu_seqlens_from_pos_ids(position_ids)
     cu_seqlens = cu_seqlens.squeeze().to(device=torch.cuda.current_device())
+    global RING_ATTN_CU_SEQLENS
+    RING_ATTN_CU_SEQLENS = cu_seqlens
     update_ring_flash_attn_params(cu_seqlens, get_ring_attn_group())

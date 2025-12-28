@@ -1,0 +1,70 @@
+# Ulysses + Ring-Attention: Ring-Only Mode (sp=1 × rp=4 = 4 GPUs)
+#
+# This config tests pure Ring-Attention (no Ulysses all-to-all).
+# context_parallel_size=4 with 9 heads → gcd(9,4)=1 → sp=1, rp=4
+#
+# Run with:
+#   accelerate launch --num-processes 4 -m axolotl.cli.train examples/ulysses-ring-attn/config_ring_only_rp4.yml
+
+base_model: HuggingFaceTB/SmolLM2-135M
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# Quantization
+load_in_4bit: true
+adapter: qlora
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_linear: true
+
+# Sequence configuration
+sequence_len: 2048
+sample_packing: true  # Required for Phase 1
+eval_sample_packing: true
+pad_to_sequence_len: true
+
+# Dataset
+datasets:
+  - path: tatsu-lab/alpaca
+    type: alpaca
+    split: train[:5%]
+
+# Training
+num_epochs: 1
+max_steps: 15
+micro_batch_size: 1
+gradient_accumulation_steps: 2
+learning_rate: 0.00001
+optimizer: adamw_8bit
+lr_scheduler: cosine
+warmup_steps: 2
+
+# Flash Attention
+flash_attention: true
+
+# Mixed precision
+bf16: auto
+
+# Ulysses + Ring-Attention Plugin
+plugins:
+  - axolotl.integrations.ulysses_ring_attn.UlyssesRingAttentionPlugin
+
+ulysses_ring_attention_enabled: true
+ulysses_ring_attention_mode: auto
+context_parallel_size: 4  # With 9 heads: sp=gcd(9,4)=1, rp=4 (Ring-only)
+ulysses_ring_attention_require_padding_free: false  # Enable auto-padding for Ring-Attention
+
+# Output
+output_dir: ./outputs/ulysses_ring_ring_only_rp4
+logging_steps: 1
+save_steps: 10
+use_tensorboard: true
+
+# Special tokens
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+# Safety
+strict: false
+loss_watchdog_threshold: 5.0

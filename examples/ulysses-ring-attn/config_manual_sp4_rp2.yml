@@ -1,0 +1,72 @@
+# Ulysses + Ring-Attention: Manual Override (sp=4 × rp=2 = 8 GPUs)
+#
+# This config tests manual sp/rp specification, bypassing GCD-based decomposition.
+# User explicitly sets sp_size=4 and rp_size=2.
+#
+# Run with:
+#   accelerate launch --num-processes 8 -m axolotl.cli.train examples/ulysses-ring-attn/config_manual_sp4_rp2.yml
+
+base_model: HuggingFaceTB/SmolLM2-1.7B
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# Quantization
+load_in_4bit: true
+adapter: qlora
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_linear: true
+
+# Sequence configuration
+sequence_len: 2048
+sample_packing: true  # Required for Phase 1
+eval_sample_packing: true
+pad_to_sequence_len: true
+
+# Dataset
+datasets:
+  - path: tatsu-lab/alpaca
+    type: alpaca
+    split: train[:5%]
+
+# Training
+num_epochs: 1
+max_steps: 15
+micro_batch_size: 1
+gradient_accumulation_steps: 2
+learning_rate: 0.00001
+optimizer: adamw_8bit
+lr_scheduler: cosine
+warmup_steps: 2
+
+# Flash Attention
+flash_attention: true
+
+# Mixed precision
+bf16: auto
+
+# Ulysses + Ring-Attention Plugin with Manual Overrides
+plugins:
+  - axolotl.integrations.ulysses_ring_attn.UlyssesRingAttentionPlugin
+
+ulysses_ring_attention_enabled: true
+ulysses_ring_attention_mode: auto
+ulysses_ring_attention_sp_size: 4  # Manual override: 4-way Ulysses
+ulysses_ring_attention_rp_size: 2  # Manual override: 2-way Ring
+context_parallel_size: 8  # Must equal sp × rp
+ulysses_ring_attention_require_padding_free: false  # Enable auto-padding (Phase 2.3)
+
+# Output
+output_dir: ./outputs/ulysses_ring_manual_sp4_rp2
+logging_steps: 1
+save_steps: 10
+use_tensorboard: true
+
+# Special tokens
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+# Safety
+strict: false
+loss_watchdog_threshold: 5.0

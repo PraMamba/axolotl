@@ -1,0 +1,66 @@
+# Baseline: No Context Parallelism (for convergence comparison)
+#
+# This config runs standard training WITHOUT Ulysses + Ring-Attention.
+# Use this as a baseline to compare loss curves and validate that distributed
+# attention produces equivalent results.
+#
+# Run with:
+#   accelerate launch --num-processes 1 -m axolotl.cli.train examples/ulysses-ring-attn/config_baseline_no_cp.yml
+
+base_model: HuggingFaceTB/SmolLM2-135M
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# Quantization (same as distributed configs)
+load_in_4bit: true
+adapter: qlora
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_linear: true
+
+# Sequence configuration (same as distributed configs)
+sequence_len: 2048
+sample_packing: true
+eval_sample_packing: true
+pad_to_sequence_len: true
+
+# Dataset (same as distributed configs)
+datasets:
+  - path: tatsu-lab/alpaca
+    type: alpaca
+    split: train[:5%]
+
+# Training (same as distributed configs)
+num_epochs: 1
+max_steps: 15
+micro_batch_size: 1
+gradient_accumulation_steps: 2
+learning_rate: 0.00001
+optimizer: adamw_8bit
+lr_scheduler: cosine
+warmup_steps: 2
+
+# Flash Attention (use standard flash-attn, not distributed)
+flash_attention: true
+
+# Mixed precision
+bf16: auto
+
+# NO Ulysses + Ring-Attention Plugin
+# plugins: []  # Empty or omitted
+# context_parallel_size: 1  # Default (no context parallelism)
+
+# Output
+output_dir: ./outputs/baseline_no_cp
+logging_steps: 1
+save_steps: 10
+use_tensorboard: true
+
+# Special tokens
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+# Safety
+strict: false
+loss_watchdog_threshold: 5.0

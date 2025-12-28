@@ -1,0 +1,74 @@
+# Ulysses + Ring-Attention: Hybrid Mode (sp=3 × rp=2 = 6 GPUs)
+#
+# This config tests GCD-based decomposition with non-divisible context_parallel_size.
+# SmolLM2-135M has 9 attention heads, so cp=6 → sp=gcd(9,6)=3, rp=2
+#
+# Run with:
+#   accelerate launch --num-processes 6 -m axolotl.cli.train examples/ulysses-ring-attn/config_hybrid_sp3_rp2.yml
+
+base_model: HuggingFaceTB/SmolLM2-135M
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# Quantization (for memory efficiency on smaller GPUs)
+load_in_4bit: true
+adapter: qlora
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_linear: true
+lora_modules_to_save:
+  - embed_tokens
+  - lm_head
+
+# Sequence configuration
+sequence_len: 2048
+sample_packing: true  # Required for Phase 1
+eval_sample_packing: true
+pad_to_sequence_len: true
+
+# Dataset
+datasets:
+  - path: tatsu-lab/alpaca
+    type: alpaca
+    split: train[:10%]
+
+# Training
+num_epochs: 1
+max_steps: 20
+micro_batch_size: 1
+gradient_accumulation_steps: 2
+learning_rate: 0.00001
+optimizer: adamw_8bit
+lr_scheduler: cosine
+warmup_steps: 2
+
+# Flash Attention (required for plugin)
+flash_attention: true
+
+# Mixed precision
+bf16: auto
+
+# Ulysses + Ring-Attention Plugin
+plugins:
+  - axolotl.integrations.ulysses_ring_attn.UlyssesRingAttentionPlugin
+
+ulysses_ring_attention_enabled: true
+ulysses_ring_attention_mode: auto  # Auto GCD decomposition
+context_parallel_size: 6  # sp=3, rp=2
+ulysses_ring_attention_require_padding_free: false  # Enable auto-padding (Phase 2.3)
+
+# Output
+output_dir: ./outputs/ulysses_ring_hybrid_sp3_rp2
+logging_steps: 1
+save_steps: 10
+use_tensorboard: true
+
+# Special tokens
+special_tokens:
+  pad_token: "<|endoftext|>"
+
+# Safety
+strict: false
+loss_watchdog_threshold: 5.0
+loss_watchdog_patience: 3
