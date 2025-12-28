@@ -50,11 +50,8 @@ def apply_sequence_parallelism(
     """
     batch_size, original_seq_len = batch["input_ids"].shape
 
-    # Update ring attention params if needed
-    if batch.get("position_ids") is not None and batch_size == 1:
-        update_ring_attn_params(position_ids=batch["position_ids"])
-    else:
-        # If position_ids aren't already in the batch, create them
+    # Ensure position_ids exist (required for varlen sequence metadata).
+    if batch.get("position_ids") is None:
         batch["position_ids"] = torch.arange(
             0,
             original_seq_len,
@@ -131,6 +128,12 @@ def apply_sequence_parallelism(
 
         # Update the total sequence length after padding
         total_seq_len = batch["input_ids"].size(1)
+
+    # Update ring attention params after padding (must be divisible by world_size).
+    # This is required for varlen ring-flash-attn kernels which assert:
+    #   cu_seqlens[-1] % world_size == 0
+    if batch_size == 1 and batch.get("position_ids") is not None:
+        update_ring_attn_params(position_ids=batch["position_ids"])
 
     # Slice batch for sequence parallel
     for key in batch:

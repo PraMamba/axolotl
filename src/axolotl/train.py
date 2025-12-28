@@ -188,6 +188,8 @@ def execute_training(
                 )
             )
 
+        # Apply Axolotl sequence parallelism context manager whenever context parallelism is enabled.
+        # The Ulysses+Ring plugin relies on the same batch slicing + padding semantics.
         if cfg.context_parallel_size > 1:
             models = [trainer.model]
             if hasattr(trainer, "ref_model") and trainer.ref_model:
