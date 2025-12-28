@@ -1,0 +1,150 @@
+# Example configuration for Channel Loss Plugin
+#
+# Channel Loss enables per-channel loss tracking during training.
+# This is useful for monitoring loss on different data sources
+# (e.g., math, code, general) during multi-domain training.
+#
+# The feature is ported from ms-swift framework.
+#
+# IMPORTANT: See README.md in this directory for:
+#   - Full compatibility matrix
+#   - Troubleshooting guide
+#   - Advanced usage examples
+
+base_model: Qwen/Qwen2.5-7B-Instruct
+model_type: AutoModelForCausalLM
+tokenizer_type: AutoTokenizer
+
+# Load the model with 4-bit quantization
+load_in_4bit: true
+adapter: qlora
+lora_r: 32
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_linear: true
+
+# ============================================================
+# Channel Loss Plugin Configuration
+# ============================================================
+plugins:
+  - axolotl.integrations.channel_loss.ChannelLossPlugin
+
+# Enable Channel Loss tracking
+enable_channel_loss: true
+
+# Field name in dataset containing channel info
+# Default: "channel"
+channel_loss_field: "channel"
+
+# Prefix for channel loss metrics in logs
+# E.g., "loss_" will result in "loss_math", "loss_code", etc.
+# Default: "loss_"
+channel_loss_prefix: "loss_"
+
+# Segment detection strategy for packing mode
+# Options:
+#   - "auto": prefer attention_mask segment ids, fallback to position_ids
+#   - "position_ids": use position_ids == 0 as segment boundary
+#   - "attention_mask": use attention_mask value changes as segment boundary
+# Default: "auto"
+channel_loss_segment: "auto"
+
+# Warn when channel field is missing in sample
+# Default: true
+channel_loss_warn_on_missing: true
+
+# ============================================================
+# Dataset Configuration
+# ============================================================
+# Method 1: Specify channel at dataset level
+datasets:
+  - path: /path/to/math_dataset.jsonl
+    type: alpaca
+    channel: math  # All samples from this dataset are "math" channel
+
+  - path: /path/to/code_dataset.jsonl
+    type: alpaca
+    channel: code  # All samples from this dataset are "code" channel
+
+  - path: /path/to/general_dataset.jsonl
+    type: alpaca
+    channel: general  # All samples from this dataset are "general" channel
+
+# Method 2: Channel specified in data items (alternative)
+# Each JSONL line contains: {"messages": [...], "channel": "math"}
+# In this case, don't specify channel at dataset level
+
+# ============================================================
+# Training Configuration
+# ============================================================
+sequence_len: 2048
+sample_packing: true  # Channel Loss supports packing mode
+
+output_dir: ./outputs/channel-loss-example
+
+# Training hyperparameters
+gradient_accumulation_steps: 4
+micro_batch_size: 2
+num_epochs: 3
+learning_rate: 0.0002
+optimizer: adamw_torch
+lr_scheduler: cosine
+warmup_ratio: 0.1
+
+# Logging configuration
+logging_steps: 10  # Channel metrics logged every 10 steps
+save_steps: 500
+eval_steps: 500
+
+# Mixed precision
+bf16: auto
+
+# Gradient checkpointing for memory efficiency
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# ============================================================
+# Memory Optimization Compatibility
+# ============================================================
+# Channel Loss requires access to model logits. Choose compatible options:
+
+# ✅ COMPATIBLE - Use this for memory optimization:
+# chunked_cross_entropy: true
+# chunk_size: 8192
+
+# ❌ INCOMPATIBLE - Do NOT enable these with Channel Loss:
+# liger_fused_linear_cross_entropy: true  # Uses skip_logits=True
+# cut_cross_entropy: true  # Auto-disabled by plugin with warning
+
+# ✅ COMPATIBLE - Non-fused Liger CE works:
+# liger_cross_entropy: true  # OK (not the fused version)
+
+# ============================================================
+# Training Mode Compatibility
+# ============================================================
+# ✅ COMPATIBLE: Standard SFT (Supervised Fine-Tuning)
+# This example uses SFT - fully compatible
+
+# ❌ INCOMPATIBLE: Knowledge Distillation
+# kd_trainer: true  # Do NOT use with Channel Loss
+
+# ⚠️  WORKS BUT QUESTIONABLE: RL Training
+# rl: dpo  # DPO/KTO/ORPO/SIMPO/GRPO
+# Channel Loss works but may not be meaningful for preference-based training
+
+# ============================================================
+# DeepSpeed Configuration (Optional)
+# ============================================================
+# Channel Loss is fully compatible with DeepSpeed ZeRO-2/3
+# deepspeed: deepspeed_configs/zero3_bf16.json
+
+# ============================================================
+# Expected Log Output
+# ============================================================
+# When training, you'll see metrics like:
+#   Step 10: loss=2.345, loss_math=2.123, loss_code=2.567, loss_general=2.345
+#   Step 20: loss=2.234, loss_math=2.001, loss_code=2.456, loss_general=2.245
+#
+# This helps monitor which data domains are learning faster/slower
+# and can guide dataset mixing ratios.
