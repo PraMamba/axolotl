@@ -18,12 +18,15 @@ Unit tests for Channel Loss Plugin.
 Tests the core functionality of the Channel Loss feature ported from ms-swift.
 """
 
+from collections import defaultdict
+
 import pytest
 import torch
 
 from axolotl.integrations.channel_loss.collator_wrapper import (
     wrap_collator_for_channel_loss,
 )
+from axolotl.integrations.channel_loss.compute_loss_patch import _update_channel_stats
 from axolotl.integrations.channel_loss.segment import (
     flatten_channels,
     get_segment_boundaries,
@@ -117,12 +120,11 @@ class TestSegmentBoundaries:
             mode="auto",
         )
 
-        # Fallback: each batch item is a segment
-        # For labels (2, 10), after shift we have (10-1)=9 tokens per item
-        # cu_seqlens = [0, 9, 18]
+        # Fallback: each batch item is a segment (token index space)
+        # For labels (2, 10), token boundaries are [0, 10, 20]
         assert cu_seqlens[0].item() == 0
-        assert cu_seqlens[1].item() == 9
-        assert cu_seqlens[2].item() == 18
+        assert cu_seqlens[1].item() == 10
+        assert cu_seqlens[2].item() == 20
 
 
 class TestFlattenChannels:
@@ -388,6 +390,172 @@ class TestConflictDetection:
 
         with pytest.raises(ValueError, match="incompatible with KD trainer"):
             plugin.register(cfg)
+
+
+class TestChannelLossWithContextParallelism:
+    def test_cp_local_standard_mode_matches_full(self, monkeypatch):
+        """
+        CP-local outputs (gather_outputs=False): stats computed shard-wise should match
+        stats computed on full logits/labels.
+        """
+
+        class DummyModel:
+            training = True
+
+        class DummyTrainer:
+            def __init__(self):
+                self.model = DummyModel()
+                self._channel_loss_stats = {
+                    "train": defaultdict(lambda: {"sum": 0.0, "count": 0}),
+                    "eval": defaultdict(lambda: {"sum": 0.0, "count": 0}),
+                }
+
+        trainer = DummyTrainer()
+
+        cp_size = 2
+        cp_group = object()
+
+        # Patch CP group detection + distributed helpers (no collectives used).
+        monkeypatch.setattr(
+            "axolotl.integrations.channel_loss.compute_loss_patch._get_context_parallel_group",
+            lambda _trainer: cp_group,
+        )
+        monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+
+        def _get_world_size(group=None):
+            return cp_size if group is cp_group else 1
+
+        monkeypatch.setattr("torch.distributed.get_world_size", _get_world_size)
+
+        # Small synthetic example: seq_len divisible by cp_size.
+        torch.manual_seed(0)
+        batch_size = 1
+        seq_len = 6
+        vocab_size = 11
+        channels = ["task_A"]
+
+        logits_full = torch.randn(batch_size, seq_len, vocab_size)
+        labels_full = torch.randint(0, vocab_size, (batch_size, seq_len))
+
+        # Expected (full) computation
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        full_loss = loss_fct(
+            logits_full[:, :-1, :].contiguous().view(-1, vocab_size),
+            labels_full[:, 1:].contiguous().view(-1),
+        )
+        expected_sum = full_loss.sum().item()
+        expected_count = full_loss.numel()
+
+        # Simulate CP ranks: each sees a chunk of logits
+        chunk = seq_len // cp_size
+
+        for cp_rank in range(cp_size):
+            monkeypatch.setattr(
+                "torch.distributed.get_rank", lambda group=None, r=cp_rank: r
+            )
+            logits_local = logits_full[:, cp_rank * chunk : (cp_rank + 1) * chunk, :]
+            _update_channel_stats(
+                trainer=trainer,
+                logits=logits_local,
+                labels=labels_full,
+                channels=channels,
+                position_ids=None,
+                attention_mask=None,
+                segment_mode="auto",
+                prefix="loss=",
+            )
+
+        stats = trainer._channel_loss_stats["train"]["loss=task_A"]
+        assert stats["count"] == expected_count
+        assert stats["sum"] == pytest.approx(expected_sum, rel=1e-6, abs=1e-6)
+
+    def test_cp_local_packing_mode_attributes_boundary_to_next_segment(
+        self, monkeypatch
+    ):
+        """
+        Packing mode with a CP boundary exactly on a segment boundary: the boundary token loss
+        should be attributed to the *next* segment (by token position), even though it's computed
+        on the previous CP rank.
+        """
+
+        class DummyModel:
+            training = True
+
+        class DummyTrainer:
+            def __init__(self):
+                self.model = DummyModel()
+                self._channel_loss_stats = {
+                    "train": defaultdict(lambda: {"sum": 0.0, "count": 0}),
+                    "eval": defaultdict(lambda: {"sum": 0.0, "count": 0}),
+                }
+
+        trainer = DummyTrainer()
+
+        cp_size = 2
+        cp_group = object()
+
+        monkeypatch.setattr(
+            "axolotl.integrations.channel_loss.compute_loss_patch._get_context_parallel_group",
+            lambda _trainer: cp_group,
+        )
+        monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+
+        def _get_world_size(group=None):
+            return cp_size if group is cp_group else 1
+
+        monkeypatch.setattr("torch.distributed.get_world_size", _get_world_size)
+
+        torch.manual_seed(0)
+        batch_size = 1
+        seq_len = 6
+        vocab_size = 11
+
+        logits_full = torch.randn(batch_size, seq_len, vocab_size)
+        labels_full = torch.randint(0, vocab_size, (batch_size, seq_len))
+
+        # Two packed segments of length 3 each; CP boundary is also at 3.
+        attention_mask = torch.tensor([[1, 1, 1, 2, 2, 2]])
+        channels = [["seg1", "seg2"]]
+
+        # Expected per-segment full computation (token losses correspond to target tokens)
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        full_loss = loss_fct(
+            logits_full[:, :-1, :].contiguous().view(-1, vocab_size),
+            labels_full[:, 1:].contiguous().view(-1),
+        )
+        # seg1 covers tokens 0..2 -> losses for tokens 1..2 (indices 0..1)
+        expected_seg1 = full_loss[0:2]
+        # seg2 covers tokens 3..5 -> losses for tokens 3..5 (indices 2..4)
+        expected_seg2 = full_loss[2:5]
+
+        chunk = seq_len // cp_size
+        for cp_rank in range(cp_size):
+            monkeypatch.setattr(
+                "torch.distributed.get_rank", lambda group=None, r=cp_rank: r
+            )
+            logits_local = logits_full[:, cp_rank * chunk : (cp_rank + 1) * chunk, :]
+            _update_channel_stats(
+                trainer=trainer,
+                logits=logits_local,
+                labels=labels_full,
+                channels=channels,
+                position_ids=None,
+                attention_mask=attention_mask,
+                segment_mode="attention_mask",
+                prefix="loss=",
+            )
+
+        seg1_stats = trainer._channel_loss_stats["train"]["loss=seg1"]
+        seg2_stats = trainer._channel_loss_stats["train"]["loss=seg2"]
+
+        assert seg1_stats["count"] == expected_seg1.numel()
+        assert seg2_stats["count"] == expected_seg2.numel()
+        assert seg1_stats["sum"] == pytest.approx(
+            expected_seg1.sum().item(), rel=1e-6, abs=1e-6
+        )
+        assert seg2_stats["sum"] == pytest.approx(
+            expected_seg2.sum().item(), rel=1e-6, abs=1e-6
+        )
 
     def test_liger_flce_error_message_includes_solutions(self):
         """Test that Liger FLCE error provides solution alternatives."""

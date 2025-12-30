@@ -52,7 +52,7 @@ Step 20: loss=2.234, loss_math=2.001, loss_code=2.456
 | **DeepSpeed ZeRO-2/3** | ✅ Fully Compatible | Automatic distributed synchronization |
 | **FSDP** | ✅ Fully Compatible | Works with all FSDP sharding strategies |
 | **Tensor Parallelism** | ✅ Fully Compatible | Channel stats tracked on each TP rank |
-| **Context Parallelism** | ✅ Fully Compatible | NaN/Inf filtering for CP boundaries |
+| **Context Parallelism (CP = 1)** | ✅ Fully Compatible | Default configuration |
 | **Gradient Checkpointing** | ✅ Fully Compatible | Uses detached tensors, no gradient impact |
 | **Flash Attention** | ✅ Fully Compatible | No interaction with attention mechanisms |
 | **LoRA/QLoRA** | ✅ Fully Compatible | Works with all PEFT adapters |
@@ -62,6 +62,7 @@ Step 20: loss=2.234, loss_math=2.001, loss_code=2.456
 
 | Feature | Status | Why Incompatible | Solution |
 |---------|--------|------------------|----------|
+| **Context Parallelism (CP > 1)** | ❌ **Incompatible** | CP slices sequence dimension causing shape mismatches in per-token loss | Use Tensor Parallelism or FSDP instead |
 | **Liger Fused Linear Cross Entropy** | ❌ **Incompatible** | Skips logits materialization with `skip_logits=True` in training mode | Use `chunked_cross_entropy: true` instead (compatible, saves memory) |
 | **Knowledge Distillation (KD)** | ❌ **Incompatible** | KD's `compute_loss()` ignores `return_outputs=True` parameter | Use standard SFT training or disable Channel Loss |
 | **Cut Cross Entropy** | ⚠️ Auto-Disabled | Does not materialize logits to save memory | Plugin automatically disables CCE with warning |
@@ -267,7 +268,7 @@ See `qlora-channel-loss.yaml` for a complete working example with:
 ## References
 
 - **Original Implementation**: [ms-swift Channel Loss](https://github.com/modelscope/swift)
-- **Compatibility Audit**: `specs/001-channel-loss-compatibility-audit.md`
+- **Compatibility Analysis**: `specs/007-channel-loss-compatibility/COMPATIBILITY_ANALYSIS.md`
 - **Source Code**: `src/axolotl/integrations/channel_loss/`
 
 ## Technical Details
