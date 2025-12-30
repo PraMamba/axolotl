@@ -89,8 +89,10 @@ class ChannelLossLoggingCallback(TrainerCallback):
 
         stats = self.trainer._channel_loss_stats["train"]
 
-        if not stats:
-            return
+        # CRITICAL FIX (BUG 4): Do NOT early return when stats is empty.
+        # Even if this rank has no stats, it MUST participate in collective operations
+        # (all_gather_object, all_reduce) to avoid deadlock when other ranks DO have stats.
+        # The _compute_and_sync method handles empty stats correctly by contributing zeros.
 
         # Compute synchronized metrics
         channel_logs = self._compute_and_sync(stats)
@@ -130,8 +132,9 @@ class ChannelLossLoggingCallback(TrainerCallback):
             return
 
         stats = self.trainer._channel_loss_stats["eval"]
-        if not stats:
-            return
+
+        # CRITICAL FIX (BUG 4): Do NOT early return when stats is empty.
+        # Same reasoning as on_log: all ranks must participate in collectives.
 
         # Compute synchronized metrics
         channel_logs = self._compute_and_sync(stats)
