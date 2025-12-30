@@ -107,9 +107,19 @@ def _process_standard_batch(
     """
     channels = []
 
+    # DEBUG: Log what fields we receive
+    if features:
+        LOG.info(
+            f"[Collator] Received {len(features)} features, first feature keys: {list(features[0].keys())}, channel_field: {channel_field}"
+        )
+
     for _i, feat in enumerate(features):
         # Try to get channel from sample
         ch = feat.pop(channel_field, None)
+
+        # DEBUG: Log extraction result
+        if _i == 0:
+            LOG.info(f"[Collator] Extracted channel from first feature: {ch}")
 
         if ch is None and dataset_channels:
             # Fallback to dataset-level channel mapping

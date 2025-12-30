@@ -101,7 +101,7 @@ class ChannelLossPlugin(BasePlugin):
                 "  1. Use 'chunked_cross_entropy: true' instead (compatible, saves memory)\n"
                 "  2. Use 'liger_cross_entropy: true' (non-fused, partial optimization)\n"
                 "  3. Disable Channel Loss if Liger FLCE is critical for your memory budget\n\n"
-                "See: specs/001-channel-loss-compatibility-audit.md for details"
+                "See: specs/007-channel-loss-compatibility/COMPATIBILITY_ANALYSIS.md for details"
             )
 
         # 2. Knowledge Distillation (KD) Trainer
@@ -114,7 +114,7 @@ class ChannelLossPlugin(BasePlugin):
                 "  1. Disable Channel Loss for KD training\n"
                 "  2. Wait for KD Trainer fix (track issue in GitHub)\n"
                 "  3. Use standard SFT training if Channel Loss is required\n\n"
-                "See: specs/001-channel-loss-compatibility-audit.md for details"
+                "See: specs/007-channel-loss-compatibility/COMPATIBILITY_ANALYSIS.md for details"
             )
 
         # === Soft Conflicts: Cut Cross Entropy (auto-disable) ===

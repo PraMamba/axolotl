@@ -28,11 +28,13 @@ Design notes:
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from axolotl.utils.logging import get_logger
 
 from .segment import flatten_channels, get_segment_boundaries
+from .utils import _get_context_parallel_group
 
 LOG = get_logger(__name__)
 
@@ -85,15 +87,16 @@ def patch_compute_loss_for_channel_loss(
         Returns:
             Loss tensor, or (loss, outputs) tuple if return_outputs=True.
         """
-        # Extract channel (side input, not passed to model)
+        # Extract channel from batch (collator always uses "channel" key)
+        # Note: collator extracts from dataset's channel_loss_field and stores in batch["channel"]
         channels = inputs.pop("channel", None)
 
-        # Remove channel_loss_field if it exists (shouldn't be passed to model)
-        # Use configured field name to avoid hardcoding
-        channel_field = cfg.get("channel_loss_field", "channel")
-        inputs.pop(channel_field, None)
-
-        # Get tensors needed for channel statistics (before they might be modified)
+        # Get tensors needed for channel statistics.
+        #
+        # NOTE (Axolotl Context Parallelism):
+        # CP slices model kwargs inside a forward pre-hook using `kwargs.copy()`. As a result,
+        # this `inputs` dict keeps the *full* tensors, while `outputs.logits` may be CP-local
+        # (when `SequenceParallelContextManager(gather_outputs=False)`).
         labels = inputs.get("labels")
         position_ids = inputs.get("position_ids")
         attention_mask = inputs.get("attention_mask")
@@ -121,7 +124,6 @@ def patch_compute_loss_for_channel_loss(
 
         if channels is not None and labels is not None:
             if has_logits:
-                # Happy path: compute channel statistics
                 _update_channel_stats(
                     trainer=trainer,
                     logits=outputs.logits,
@@ -187,63 +189,198 @@ def _update_channel_stats(
     Design:
         - Uses torch.no_grad() to prevent any gradient computation
         - Detaches per-token loss from computation graph
-        - Filters NaN/Inf values (Context Parallel safety)
+        - CP-aware:
+          - When CP is enabled and outputs are CP-local (gather_outputs=False), avoids
+            all-gathering full logits and instead computes boundary-correct losses using
+            the full (pre-hook) labels tensor available in `inputs`.
+          - When CP outputs are already gathered (gather_outputs=True), computes only
+            on CP rank 0 to avoid redundant work.
+        - Filters NaN/Inf values (safety)
     """
     with torch.no_grad():
-        # Compute per-token cross entropy
-        # Shift logits and labels for causal LM (predict next token)
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
+        if logits is None or labels is None or not channels:
+            return
 
-        # Compute per-token loss without reduction
+        batch_size, label_seq_len = labels.shape
+        logits_seq_len = logits.size(1)
+
+        cp_group = _get_context_parallel_group(trainer)
+        cp_enabled = cp_group is not None and dist.is_initialized()
+        cp_size = dist.get_world_size(cp_group) if cp_enabled else 1
+        cp_rank = dist.get_rank(cp_group) if cp_enabled else 0
+
+        # Segment detection expects position_ids in "auto" mode; CP pre-hook creates it
+        # if missing, but that happens on a kwargs copy. Create it here as well if absent.
+        if position_ids is None:
+            position_ids = torch.arange(
+                0, label_seq_len, dtype=torch.long, device=labels.device
+            ).expand(batch_size, -1)
+
+        is_packing = isinstance(channels[0], list)
+
+        # Detect whether `logits` are CP-local (post-hook gather disabled) or already gathered.
+        is_cp_local_logits = False
+        if cp_size > 1:
+            divisor = min(cp_size, 64)
+            pad_len = (divisor - (label_seq_len % divisor)) % divisor
+            expected_chunk_len = (label_seq_len + pad_len) // cp_size
+            is_cp_local_logits = logits_seq_len == expected_chunk_len
+            LOG.info(
+                f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] CP detection: "
+                f"logits_seq_len={logits_seq_len}, label_seq_len={label_seq_len}, "
+                f"expected_chunk_len={expected_chunk_len}, is_cp_local={is_cp_local_logits}, "
+                f"cp_rank={cp_rank}, cp_size={cp_size}"
+            )
+
+        # If CP outputs are already gathered, compute only on CP-rank 0 to avoid redundant work.
+        if cp_size > 1 and not is_cp_local_logits and cp_rank != 0:
+            return
+
+        loss_offset = 0  # global loss-index offset (used for packing overlap)
+
+        if cp_size > 1 and is_cp_local_logits:
+            # CP-local path (SFT gather_outputs=False):
+            #
+            # Compute boundary-correct losses for this CP shard without all-gathering logits.
+            # For CP rank r with local token chunk [s, s+L), we compute losses for targets:
+            #   tokens [s+1, s+L] (non-last ranks)
+            #   tokens [s+1, s+L-1] (last rank; global last token has no target)
+            #
+            # This uses the full (pre-hook) `labels` tensor and pads out-of-range tokens
+            # with ignore_index=-100.
+            token_chunk_len = logits_seq_len
+            local_token_start = cp_rank * token_chunk_len
+            is_last_cp_rank = cp_rank == (cp_size - 1)
+
+            token_count = token_chunk_len - (1 if is_last_cp_rank else 0)
+            if token_count <= 0:
+                return
+
+            shift_logits = logits[:, :-1, :].contiguous() if is_last_cp_rank else logits
+
+            label_start = local_token_start + 1
+            label_end = label_start + token_count
+
+            if label_start >= label_seq_len:
+                shift_labels = torch.full(
+                    (batch_size, token_count),
+                    -100,
+                    dtype=labels.dtype,
+                    device=labels.device,
+                )
+            else:
+                slice_end = min(label_end, label_seq_len)
+                shift_labels = labels[:, label_start:slice_end]
+                if shift_labels.size(1) < token_count:
+                    pad = torch.full(
+                        (batch_size, token_count - shift_labels.size(1)),
+                        -100,
+                        dtype=labels.dtype,
+                        device=labels.device,
+                    )
+                    shift_labels = torch.cat([shift_labels, pad], dim=1)
+
+            loss_offset = local_token_start
+
+            if shift_logits.size(1) != shift_labels.size(1):
+                LOG.warning(
+                    "Channel Loss (CP): shift_logits/shift_labels length mismatch: "
+                    "shift_logits=%s shift_labels=%s (cp_rank=%s cp_size=%s)",
+                    tuple(shift_logits.shape),
+                    tuple(shift_labels.shape),
+                    cp_rank,
+                    cp_size,
+                )
+                min_len = min(shift_logits.size(1), shift_labels.size(1))
+                shift_logits = shift_logits[:, :min_len, :].contiguous()
+                shift_labels = shift_labels[:, :min_len].contiguous()
+        else:
+            # Non-CP or CP-gathered path: standard causal shift on full tensors.
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
         loss_fct = nn.CrossEntropyLoss(reduction="none")
         per_token_loss = loss_fct(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
+            shift_logits.reshape(-1, shift_logits.size(-1)),
+            shift_labels.reshape(-1),
         ).detach()
 
         # Create valid token mask (exclude ignore_index=-100)
-        valid_mask = shift_labels.view(-1) != -100
+        valid_mask = shift_labels.reshape(-1) != -100
 
-        # Get segment boundaries (cu_seqlens)
-        cu_seqlens = get_segment_boundaries(
+        # Filter NaN/Inf values early to keep sums/counts stable.
+        valid_mask = valid_mask & torch.isfinite(per_token_loss)
+
+        # Determine mode (train or eval)
+        mode = "train" if trainer.model.training else "eval"
+        stats = trainer._channel_loss_stats[mode]
+
+        if not is_packing:
+            # Standard mode: one channel per batch item.
+            per_token_loss_2d = per_token_loss.reshape(batch_size, -1)
+            valid_mask_2d = valid_mask.reshape(batch_size, -1)
+
+            for batch_index, channel in enumerate(channels[:batch_size]):
+                row_mask = valid_mask_2d[batch_index]
+                if not row_mask.any():
+                    continue
+
+                row_loss = per_token_loss_2d[batch_index][row_mask]
+                if row_loss.numel() == 0:
+                    continue
+
+                key = f"{prefix}{channel}"
+                stats[key]["sum"] += row_loss.sum().item()
+                stats[key]["count"] += row_loss.numel()
+
+            return
+
+        # Packing mode: channels map to multiple segments within a single sequence.
+        if batch_size != 1:
+            LOG.warning(
+                "Channel Loss: packing mode expects batch_size=1; got %d. Skipping.",
+                batch_size,
+            )
+            return
+
+        cu_seqlens_token = get_segment_boundaries(
             attention_mask=attention_mask,
             position_ids=position_ids,
             labels=labels,
             mode=segment_mode,
         )
 
-        # Flatten channels for packing mode
+        # Token-boundaries -> loss-index boundaries (token_pos -> token_pos - 1).
+        max_loss_len = max(label_seq_len - 1, 0)
+        cu_seqlens_loss = torch.clamp(cu_seqlens_token - 1, min=0, max=max_loss_len)
+
         flat_channels = flatten_channels(channels)
+        num_segments = min(len(flat_channels), int(cu_seqlens_loss.numel()) - 1)
 
-        # Determine mode (train or eval)
-        mode = "train" if trainer.model.training else "eval"
-        stats = trainer._channel_loss_stats[mode]
-
-        # Accumulate per-channel statistics
-        num_segments = min(len(flat_channels), cu_seqlens.shape[0] - 1)
+        local_loss_start = loss_offset
+        local_loss_end = loss_offset + per_token_loss.numel()
 
         for i in range(num_segments):
             channel = flat_channels[i]
-            start = cu_seqlens[i].item()
-            end = cu_seqlens[i + 1].item()
+            seg_start = int(cu_seqlens_loss[i].item())
+            seg_end = int(cu_seqlens_loss[i + 1].item())
 
-            # Bounds check
-            if start >= per_token_loss.shape[0] or end > per_token_loss.shape[0]:
+            overlap_start = max(seg_start, local_loss_start)
+            overlap_end = min(seg_end, local_loss_end)
+            if overlap_start >= overlap_end:
                 continue
-            if start >= end:
+
+            local_start = overlap_start - local_loss_start
+            local_end = overlap_end - local_loss_start
+
+            segment_mask = valid_mask[local_start:local_end]
+            if not segment_mask.any():
                 continue
 
-            segment_loss = per_token_loss[start:end]
-            segment_mask = valid_mask[start:end]
-            valid_loss = segment_loss[segment_mask]
+            segment_loss = per_token_loss[local_start:local_end][segment_mask]
+            if segment_loss.numel() == 0:
+                continue
 
-            if valid_loss.numel() > 0:
-                # Filter NaN/Inf values (Context Parallel safety)
-                finite_mask = torch.isfinite(valid_loss)
-                valid_loss = valid_loss[finite_mask]
-
-                if valid_loss.numel() > 0:
-                    key = f"{prefix}{channel}"
-                    stats[key]["sum"] += valid_loss.sum().item()
-                    stats[key]["count"] += valid_loss.numel()
+            key = f"{prefix}{channel}"
+            stats[key]["sum"] += segment_loss.sum().item()
+            stats[key]["count"] += segment_loss.numel()

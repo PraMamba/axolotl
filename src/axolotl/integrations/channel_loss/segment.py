@@ -55,8 +55,8 @@ def get_segment_boundaries(
     batch_size, seq_len = labels.shape
     device = labels.device
 
-    # Flatten for easier processing (assuming batch_size=1 for packing mode)
-    # For standard padding mode, we treat each batch item as a segment
+    # NOTE: cu_seqlens are returned in *token index space* (pre causal-shift).
+    # The caller is responsible for mapping to loss-index space (post shift).
 
     if mode == "auto":
         mode = _detect_mode(attention_mask, position_ids)
@@ -68,8 +68,7 @@ def get_segment_boundaries(
         return _get_boundaries_from_position_ids(position_ids, device)
 
     # Fallback: each batch item is a segment (standard padding mode)
-    # For labels of shape (batch_size, seq_len), after shift we have (seq_len - 1) tokens per item
-    cu_seqlens = torch.arange(0, batch_size + 1, device=device) * (seq_len - 1)
+    cu_seqlens = torch.arange(0, batch_size + 1, device=device) * seq_len
     return cu_seqlens
 
 

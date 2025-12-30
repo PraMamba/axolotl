@@ -225,6 +225,7 @@ def _handle_loaded_strategy(
     dataset_wrapper = wrap_dataset_for_tokenized_prompt(
         dataset_strategy,
         dataset,
+        cfg=cfg,
         **dataset_kwargs,
     )
     return dataset_wrapper, dataset_prompter
