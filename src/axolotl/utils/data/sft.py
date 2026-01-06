@@ -324,6 +324,13 @@ def _load_raw_datasets(
             "pre-process your dataset using `axolotl preprocess path/to/config.yml`."
         )
 
+    # Inject dataset indices for Channel Loss plugin tracking
+    # This happens AFTER config validation, so it won't be stripped
+    if cfg.get("enable_channel_loss"):
+        for idx, ds_cfg in enumerate(datasets_configs):
+            ds_cfg["_channel_loss_dataset_idx"] = idx
+            LOG.debug(f"Channel Loss: Tagged dataset {idx} with index marker")
+
     # Load and process individual datasets
     datasets = []
     prompters = []
@@ -407,6 +414,37 @@ def _load_and_process_single_dataset(
         dataset_prompt_style=d_prompt_style,
         processor=processor,
     )
+
+    # Inject channel field for Channel Loss plugin (Spec 013 P0-1)
+    # This happens AFTER wrapper processing, so channel field is preserved
+    if cfg.get("enable_channel_loss"):
+        dataset_idx = dataset_config.get("_channel_loss_dataset_idx")
+        if dataset_idx is not None:
+            # Get channel field name from config (default: "channel")
+            channel_field = cfg.get("channel_loss_field", "channel")
+
+            # Inject channel field into each sample
+            # We use the dataset_idx to preserve the mapping even after merge_datasets
+            def add_dataset_idx_field(example):
+                example[f"_{channel_field}_dataset_idx"] = dataset_idx
+                return example
+
+            # Apply the injection
+            # Use num_proc=1 to avoid multiprocessing overhead for simple field addition
+            if not streaming:
+                dataset_wrapper = dataset_wrapper.map(
+                    add_dataset_idx_field,
+                    desc=f"Injecting dataset_idx for Channel Loss (dataset {dataset_idx})",
+                )
+                LOG.debug(
+                    f"Channel Loss: Injected dataset_idx={dataset_idx} into {len(dataset_wrapper)} samples"
+                )
+            else:
+                # For streaming datasets, map without description
+                dataset_wrapper = dataset_wrapper.map(add_dataset_idx_field)
+                LOG.debug(
+                    f"Channel Loss: Configured dataset_idx={dataset_idx} injection for streaming dataset"
+                )
 
     return dataset_wrapper, dataset_prompter
 

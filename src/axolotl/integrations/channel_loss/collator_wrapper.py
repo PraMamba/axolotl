@@ -34,7 +34,7 @@ LOG = get_logger(__name__)
 def wrap_collator_for_channel_loss(
     inner_collator: Callable,
     channel_field: str = "channel",
-    dataset_channels: Optional[List[str]] = None,
+    dataset_channels: Optional[Dict[int, str]] = None,
     warn_on_missing: bool = True,
 ) -> Callable:
     """
@@ -43,8 +43,9 @@ def wrap_collator_for_channel_loss(
     Args:
         inner_collator: The original collator function/object to wrap.
         channel_field: Field name containing channel info in each sample.
-        dataset_channels: Optional pre-defined channel mapping from dataset config.
+        dataset_channels: Optional dict mapping dataset index to channel name.
                          Used when channel is specified at dataset level, not sample level.
+                         Format: {0: "channel1", 1: "channel2", ...}
         warn_on_missing: Whether to warn when channel field is missing.
 
     Returns:
@@ -57,6 +58,9 @@ def wrap_collator_for_channel_loss(
         4. Add channel list back to batch dict
     """
     _warned_missing = [False]  # Use list to allow mutation in nested function
+
+    # Precompute the dataset_idx field name
+    dataset_idx_field = f"_{channel_field}_dataset_idx"
 
     def wrapped_collator(features: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -76,6 +80,7 @@ def wrap_collator_for_channel_loss(
                 inner_collator,
                 channel_field,
                 dataset_channels,
+                dataset_idx_field,
                 warn_on_missing,
                 _warned_missing,
             )
@@ -85,6 +90,7 @@ def wrap_collator_for_channel_loss(
                 inner_collator,
                 channel_field,
                 dataset_channels,
+                dataset_idx_field,
                 warn_on_missing,
                 _warned_missing,
             )
@@ -96,7 +102,8 @@ def _process_standard_batch(
     features: List[Dict[str, Any]],
     inner_collator: Callable,
     channel_field: str,
-    dataset_channels: Optional[List[str]],
+    dataset_channels: Optional[Dict[int, str]],
+    dataset_idx_field: str,
     warn_on_missing: bool,
     warned_missing: List[bool],
 ) -> Dict[str, Any]:
@@ -107,31 +114,44 @@ def _process_standard_batch(
     """
     channels = []
 
-    # DEBUG: Log what fields we receive
+    # DEBUG: Log what fields we receive (use DEBUG level to avoid production noise)
     if features:
-        LOG.info(
+        LOG.debug(
             f"[Collator] Received {len(features)} features, first feature keys: {list(features[0].keys())}, channel_field: {channel_field}"
         )
 
     for _i, feat in enumerate(features):
-        # Try to get channel from sample
+        # Try to get channel directly from sample first
         ch = feat.pop(channel_field, None)
 
-        # DEBUG: Log extraction result
-        if _i == 0:
-            LOG.info(f"[Collator] Extracted channel from first feature: {ch}")
+        # Always remove the metadata field (prevents scalar concatenation errors)
+        dataset_idx = feat.pop(dataset_idx_field, None)
 
-        if ch is None and dataset_channels:
-            # Fallback to dataset-level channel mapping
-            # This requires knowing which dataset each sample came from
-            # For now, we use 'default' as fallback
-            ch = "default"
+        # If channel not found directly, try to get from dataset_idx mapping
+        if ch is None and dataset_channels and dataset_idx is not None:
+            # DEBUG: Log extraction for first feature
+            if _i == 0:
+                LOG.debug(
+                    f"[Collator] First feature: channel={ch}, dataset_idx={dataset_idx}, "
+                    f"dataset_channels={dataset_channels}"
+                )
 
+            # Lookup channel from mapping
+            if dataset_idx in dataset_channels:
+                ch = dataset_channels[dataset_idx]
+            else:
+                LOG.warning(
+                    f"Channel Loss: dataset_idx={dataset_idx} not found in dataset_channels mapping. "
+                    f"Using 'default' as channel."
+                )
+                ch = "default"
+
+        # Fallback to default if still None
         if ch is None:
             ch = "default"
             if warn_on_missing and not warned_missing[0]:
                 LOG.warning(
-                    f"Channel field '{channel_field}' not found in sample. "
+                    f"Channel field '{channel_field}' not found in sample and no dataset_idx mapping available. "
                     f"Using 'default' as channel. This warning will only be shown once."
                 )
                 warned_missing[0] = True
@@ -152,7 +172,8 @@ def _process_packing_batch(
     features: List[List[Dict[str, Any]]],
     inner_collator: Callable,
     channel_field: str,
-    dataset_channels: Optional[List[str]],
+    dataset_channels: Optional[Dict[int, str]],
+    dataset_idx_field: str,
     warn_on_missing: bool,
     warned_missing: List[bool],
 ) -> Dict[str, Any]:
@@ -167,13 +188,30 @@ def _process_packing_batch(
     for sub_batch in features:
         sub_channels = []
         for feat in sub_batch:
+            # Try to get channel directly from sample first
             ch = feat.pop(channel_field, None)
 
+            # Always remove the metadata field (prevents scalar concatenation errors)
+            dataset_idx = feat.pop(dataset_idx_field, None)
+
+            # If channel not found directly, try to get from dataset_idx mapping
+            if ch is None and dataset_channels and dataset_idx is not None:
+                # Lookup channel from mapping
+                if dataset_idx in dataset_channels:
+                    ch = dataset_channels[dataset_idx]
+                else:
+                    LOG.warning(
+                        f"Channel Loss: dataset_idx={dataset_idx} not found in dataset_channels mapping. "
+                        f"Using 'default' as channel."
+                    )
+                    ch = "default"
+
+            # Fallback to default if still None
             if ch is None:
                 ch = "default"
                 if warn_on_missing and not warned_missing[0]:
                     LOG.warning(
-                        f"Channel field '{channel_field}' not found in packed sample. "
+                        f"Channel field '{channel_field}' not found in packed sample and no dataset_idx mapping available. "
                         f"Using 'default' as channel. This warning will only be shown once."
                     )
                     warned_missing[0] = True

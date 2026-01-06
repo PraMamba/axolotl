@@ -72,6 +72,11 @@ class ChannelLossPlugin(BasePlugin):
     - Distributed training compatible (DDP, ZeRO2/3, FSDP)
     """
 
+    def __init__(self):
+        """Initialize plugin with empty dataset channel mapping."""
+        super().__init__()
+        self._dataset_channels = {}  # Maps dataset index to channel name
+
     def register(self, cfg: dict) -> None:
         """
         Register the plugin with the configuration.
@@ -117,6 +122,24 @@ class ChannelLossPlugin(BasePlugin):
                 "See: specs/007-channel-loss-compatibility/COMPATIBILITY_ANALYSIS.md for details"
             )
 
+        # 3. Sample Packing with micro_batch_size > 1
+        is_train_packing = cfg.get("sample_packing", False)
+        is_eval_packing = cfg.get("eval_sample_packing", False)
+        micro_batch_size = cfg.get("micro_batch_size", 1)
+
+        if (is_train_packing or is_eval_packing) and micro_batch_size > 1:
+            raise ValueError(
+                "Channel Loss does not support sample packing with micro_batch_size > 1.\n\n"
+                "Reason: Packing mode requires per-batch segment boundary detection, which is\n"
+                "currently only implemented for batch_size=1 to avoid complexity. With batch_size > 1,\n"
+                "Channel Loss would silently skip statistics collection without warning.\n\n"
+                "Solutions:\n"
+                "  1. Set 'micro_batch_size: 1' (recommended for packing mode)\n"
+                "  2. Disable sample packing: set 'sample_packing: false' and 'eval_sample_packing: false'\n"
+                "  3. Disable Channel Loss if both packing and batch_size > 1 are critical\n\n"
+                "See: specs/013-channel-loss-optimizations-and-robustness/README.md for details"
+            )
+
         # === Soft Conflicts: Cut Cross Entropy (auto-disable) ===
         # CCE is incompatible, but we can auto-disable it for user convenience
 
@@ -149,20 +172,20 @@ class ChannelLossPlugin(BasePlugin):
                 f"Consider whether channel-level monitoring makes sense for your use case."
             )
 
-        # Extract channel from dataset configs
+        # Extract channel from dataset configs and store in plugin instance
         # This is necessary because SFTDataset schema doesn't have 'channel' field
         # and validate_config would discard it
-        channel_map = []
-        for ds in cfg.get("datasets", []):
+        self._dataset_channels = {}
+        for idx, ds in enumerate(cfg.get("datasets", [])):
             # Pop channel to avoid schema validation errors
             ch = ds.pop("channel", None)
-            channel_map.append(ch)
-
-        # Store in private config key for later use
-        cfg["_channel_loss_dataset_channels"] = channel_map
+            if ch is not None:
+                # Store in plugin instance variable (survives validate_config)
+                # Will be used by collator to inject channel field at batch time
+                self._dataset_channels[idx] = ch
 
         LOG.info(
-            f"Channel Loss Plugin: Extracted channels from {len(channel_map)} datasets"
+            f"Channel Loss Plugin: Extracted channels from {len(self._dataset_channels)} datasets"
         )
 
     def get_input_args(self) -> str | None:
@@ -204,7 +227,6 @@ class ChannelLossPlugin(BasePlugin):
 
         # Get configuration values
         channel_field = cfg.get("channel_loss_field", "channel")
-        dataset_channels = cfg.get("_channel_loss_dataset_channels")
         warn_on_missing = cfg.get("channel_loss_warn_on_missing", True)
 
         # 0. Prevent Trainer from removing channel field
@@ -217,7 +239,7 @@ class ChannelLossPlugin(BasePlugin):
             trainer.data_collator = wrap_collator_for_channel_loss(
                 inner_collator=trainer.data_collator,
                 channel_field=channel_field,
-                dataset_channels=dataset_channels,
+                dataset_channels=self._dataset_channels,  # Pass mapping from plugin
                 warn_on_missing=warn_on_missing,
             )
             LOG.debug("Channel Loss Plugin: Wrapped train data collator")
@@ -230,7 +252,7 @@ class ChannelLossPlugin(BasePlugin):
             trainer.eval_data_collator = wrap_collator_for_channel_loss(
                 inner_collator=trainer.eval_data_collator,
                 channel_field=channel_field,
-                dataset_channels=dataset_channels,
+                dataset_channels=self._dataset_channels,  # Pass mapping from plugin
                 warn_on_missing=warn_on_missing,
             )
             LOG.debug("Channel Loss Plugin: Wrapped eval data collator")
