@@ -65,7 +65,7 @@ def get_segment_boundaries(
         return _get_boundaries_from_attention_mask(attention_mask, device)
 
     if mode == "position_ids" and position_ids is not None:
-        return _get_boundaries_from_position_ids(position_ids, device)
+        return _get_boundaries_from_position_ids(position_ids, attention_mask, device)
 
     # Fallback: each batch item is a segment (standard padding mode)
     cu_seqlens = torch.arange(0, batch_size + 1, device=device) * seq_len
@@ -119,12 +119,12 @@ def _get_boundaries_from_attention_mask(
 
     # Filter out padding transitions (where mask becomes 0 or from 0)
     # We only want boundaries between valid segments
-    valid_changes = []
-    for _i, pos in enumerate(changes):
-        prev_val = attn_flat[pos - 1].item() if pos > 0 else 0
-        # Only keep transitions between non-zero values, or from non-zero to zero (end of last segment)
-        if prev_val > 0:
-            valid_changes.append(pos)
+    # Vectorized: keep only positions where the previous value is > 0
+    if changes.numel() > 0:
+        prev_vals = attn_flat[changes - 1]
+        valid_changes = changes[prev_vals > 0].tolist()
+    else:
+        valid_changes = []
 
     # Build cu_seqlens
     cu_seqlens = torch.tensor([0] + valid_changes + [attn_flat.shape[0]], device=device)
@@ -137,6 +137,7 @@ def _get_boundaries_from_attention_mask(
 
 def _get_boundaries_from_position_ids(
     position_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
     device: torch.device,
 ) -> torch.Tensor:
     """
@@ -148,15 +149,40 @@ def _get_boundaries_from_position_ids(
         position_ids = [0, 1, 2, 0, 1, 2, 3, 0, 1]
         -> segment starts at positions 0, 3, 7
         -> cu_seqlens = [0, 3, 7, 9]
+
+    Note: When attention_mask is provided, filters out positions where
+    position_ids == 0 but attention_mask == 0 (padding area), and ending
+    position is clamped to last non-padding position.
     """
     pos_flat = position_ids.view(-1)
 
     # Find positions where position_ids == 0 (segment starts)
     seq_starts = (pos_flat == 0).nonzero(as_tuple=True)[0]
 
-    # Add ending position
+    # Determine ending position
     total_len = pos_flat.shape[0]
-    cu_seqlens = torch.cat([seq_starts, torch.tensor([total_len], device=device)])
+    end_pos = total_len
+
+    # Filter out padding positions if attention_mask is available
+    if attention_mask is not None:
+        attn_flat = attention_mask.view(-1)
+        # Keep only positions where attention_mask > 0 (non-padding)
+        # Vectorized: filter using tensor indexing instead of Python loop
+        if seq_starts.numel() > 0:
+            mask_at_starts = attn_flat[seq_starts]
+            seq_starts = seq_starts[mask_at_starts > 0]
+
+        # Find last non-padding position and use as ending
+        non_padding_positions = (attn_flat > 0).nonzero(as_tuple=True)[0]
+        if non_padding_positions.numel() > 0:
+            end_pos = int(non_padding_positions[-1].item()) + 1
+
+    # Add ending position
+    if seq_starts.numel() == 0:
+        # No valid segments found
+        cu_seqlens = torch.tensor([0, end_pos], device=device)
+    else:
+        cu_seqlens = torch.cat([seq_starts, torch.tensor([end_pos], device=device)])
 
     return cu_seqlens
 
