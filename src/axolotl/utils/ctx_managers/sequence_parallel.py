@@ -2,6 +2,7 @@
 
 import functools
 import inspect
+import logging
 
 import torch
 import torch.distributed as dist
@@ -17,6 +18,8 @@ from axolotl.monkeypatch.ring_attn import (
     update_ring_attn_params,
 )
 from axolotl.utils.schemas.enums import RingAttnFunc
+
+LOG = logging.getLogger(__name__)
 
 
 # TODO(djsaunde): implement zigzag, stripe patterns here (and elsewhere) in this
@@ -158,11 +161,29 @@ def apply_sequence_parallelism(
             global_valid_tokens = local_valid_tokens.clone()
             # we use AVG instead of SUM as using sum seems to scale down the loss by over-accounting the number of tokens
             dist.all_reduce(global_valid_tokens, op=dist.ReduceOp.AVG, group=cp_group)
-            global_valid_tokens = int(global_valid_tokens.item())
 
-            batch["num_items_in_batch"] = (
-                global_valid_tokens * gradient_accumulation_steps
-            )
+            # CRITICAL FIX: Keep as float to prevent division by zero in fixed_cross_entropy
+            # When train_on_inputs=false and CP size is large, int() can round down to 0
+            # causing Inf/NaN loss. fixed_cross_entropy handles float division correctly.
+            global_valid_tokens_float = global_valid_tokens.item()
+            # Ensure minimum of 1.0 to prevent zero division
+            global_valid_tokens_float = max(global_valid_tokens_float, 1.0)
+
+            final_num_items = global_valid_tokens_float * gradient_accumulation_steps
+
+            # Fail-fast check: ensure num_items_in_batch is valid
+            if final_num_items <= 0 or not torch.isfinite(
+                torch.tensor(final_num_items)
+            ):
+                raise ValueError(
+                    f"[CP ERROR] Invalid num_items_in_batch={final_num_items}! "
+                    f"local_valid_tokens={local_valid_tokens.item()}, "
+                    f"global_valid_tokens_after_avg={global_valid_tokens.item()}, "
+                    f"cp_rank={local_rank}, cp_size={local_world_size}, "
+                    f"gradient_accumulation_steps={gradient_accumulation_steps}"
+                )
+
+            batch["num_items_in_batch"] = final_num_items
 
     return batch, original_seq_len, pad_len
 
