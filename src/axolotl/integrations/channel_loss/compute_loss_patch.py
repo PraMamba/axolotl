@@ -225,12 +225,16 @@ def _update_channel_stats(
             pad_len = (divisor - (label_seq_len % divisor)) % divisor
             expected_chunk_len = (label_seq_len + pad_len) // cp_size
             is_cp_local_logits = logits_seq_len == expected_chunk_len
-            LOG.info(
-                f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] CP detection: "
-                f"logits_seq_len={logits_seq_len}, label_seq_len={label_seq_len}, "
-                f"expected_chunk_len={expected_chunk_len}, is_cp_local={is_cp_local_logits}, "
-                f"cp_rank={cp_rank}, cp_size={cp_size}"
-            )
+
+            # Log CP detection only once per trainer to avoid production noise
+            if not hasattr(trainer, "_channel_loss_logged_cp_detection"):
+                LOG.info(
+                    f"[RANK {dist.get_rank() if dist.is_initialized() else 0}] CP detection: "
+                    f"logits_seq_len={logits_seq_len}, label_seq_len={label_seq_len}, "
+                    f"expected_chunk_len={expected_chunk_len}, is_cp_local={is_cp_local_logits}, "
+                    f"cp_rank={cp_rank}, cp_size={cp_size}"
+                )
+                trainer._channel_loss_logged_cp_detection = True
 
         # If CP outputs are already gathered, compute only on CP-rank 0 to avoid redundant work.
         if cp_size > 1 and not is_cp_local_logits and cp_rank != 0:
