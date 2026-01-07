@@ -159,17 +159,19 @@ class ChannelLossPlugin(BasePlugin):
                 "Channel Loss Plugin: Disabled Cut Cross Entropy (set cut_cross_entropy=False)"
             )
 
-        # === Semantic Warnings: RL Training ===
-        # Technically compatible but semantically questionable
+        # === Not Recommended: RL Training ===
+        # Technically compatible but no practical use case
 
         rl_types = ["dpo", "kto", "orpo", "simpo", "grpo"]
         current_rl = cfg.get("rl")
         if current_rl and current_rl.lower() in rl_types:
             LOG.warning(
                 f"Channel Loss enabled with RL training mode: {current_rl.upper()}\n"
-                f"Note: RL training uses sample-level preference loss, not per-token causal loss.\n"
-                f"Per-channel statistics may not be meaningful for this training paradigm.\n"
-                f"Consider whether channel-level monitoring makes sense for your use case."
+                f"WARNING: Channel Loss is NOT RECOMMENDED for RL training.\n\n"
+                f"Reason: RL training optimizes sample-level preferences/rewards, not per-token loss.\n"
+                f"Channel Loss tracks token-level causal loss which is IRRELEVANT to RL objectives.\n"
+                f"The statistics collected will not reflect actual training progress.\n\n"
+                f"Recommended: Only use Channel Loss with SFT/Pretrain training modes."
             )
 
         # Extract channel from dataset configs and store in plugin instance

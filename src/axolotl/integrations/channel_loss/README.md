@@ -67,11 +67,11 @@ Step 20: loss=2.234, loss_math=2.001, loss_code=2.456
 | **Cut Cross Entropy** | ⚠️ Auto-Disabled | Does not materialize logits to save memory | Plugin automatically disables CCE with warning |
 | **Sample Packing with micro_batch_size > 1** | ❌ **Incompatible** | Packing mode requires per-batch segment detection (only implemented for batch_size=1) | Set `micro_batch_size: 1` |
 
-### ⚠️ Semantic Warnings
+### ⚠️ Not Recommended
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| **RL Training** (DPO/KTO/ORPO/SIMPO/GRPO) | ⚠️ Works but Questionable | RL uses sample-level preference loss, not per-token loss. Channel statistics may not be meaningful. |
+| Feature | Status | Why Not Recommended | Notes |
+|---------|--------|---------------------|-------|
+| **RL Training** (DPO/KTO/ORPO/SIMPO/GRPO) | ⚠️ **Not Recommended** | No practical use case | RL training optimizes sample-level preferences/rewards, not per-token loss. Channel Loss tracks token-level causal loss which is irrelevant to RL training objectives. Plugin will emit a warning but allow usage. |
 
 ## Configuration Options
 
@@ -200,13 +200,16 @@ datasets:
 2. Verify no incompatible plugins are loaded
 3. Review training logs for conflicting optimizations
 
-### Warning: "Channel Loss enabled with RL training mode"
+### Warning: "Channel Loss is NOT RECOMMENDED for RL training"
 
 **Cause**: You're using Channel Loss with DPO/KTO/ORPO/SIMPO/GRPO.
 
-**Implications**: RL training uses sample-level preference loss, not per-token causal loss. Channel statistics may not reflect meaningful learning signals.
+**Why Not Recommended**: RL training optimizes sample-level preferences/rewards, not per-token loss. Channel Loss tracks token-level causal loss which is irrelevant to RL training objectives. The collected statistics will not reflect actual training progress.
 
-**Action**: Consider whether per-channel monitoring makes sense for your RL use case. This is a semantic warning, not a technical incompatibility.
+**Action**: Channel Loss is only useful for SFT/Pretrain training modes. Consider disabling it for RL training:
+```yaml
+enable_channel_loss: false  # Recommended for RL training
+```
 
 ### No channel metrics appearing in logs
 
