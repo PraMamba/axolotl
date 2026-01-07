@@ -46,13 +46,13 @@ Step 20: loss=2.234, loss_math=2.001, loss_code=2.456
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Sample Packing** | ✅ Fully Compatible | Automatic segment detection via position_ids/attention_mask |
+| **Sample Packing** | ✅ Fully Compatible | Automatic segment detection via position_ids/attention_mask (requires `micro_batch_size=1`) |
+| **Context Parallelism (CP)** | ✅ Fully Compatible | CP-local shard-wise computation with segment boundary detection |
 | **Chunked Cross Entropy** | ✅ Fully Compatible | Logits are materialized in chunks |
 | **Liger Cross Entropy** (non-fused) | ✅ Fully Compatible | Use `liger_cross_entropy: true` (not the fused version) |
 | **DeepSpeed ZeRO-2/3** | ✅ Fully Compatible | Automatic distributed synchronization |
-| **FSDP** | ✅ Fully Compatible | Works with all FSDP sharding strategies |
+| **FSDP/FSDP2** | ✅ Fully Compatible | Works with all FSDP sharding strategies |
 | **Tensor Parallelism** | ✅ Fully Compatible | Channel stats tracked on each TP rank |
-| **Context Parallelism (CP = 1)** | ✅ Fully Compatible | Default configuration |
 | **Gradient Checkpointing** | ✅ Fully Compatible | Uses detached tensors, no gradient impact |
 | **Flash Attention** | ✅ Fully Compatible | No interaction with attention mechanisms |
 | **LoRA/QLoRA** | ✅ Fully Compatible | Works with all PEFT adapters |
@@ -62,10 +62,10 @@ Step 20: loss=2.234, loss_math=2.001, loss_code=2.456
 
 | Feature | Status | Why Incompatible | Solution |
 |---------|--------|------------------|----------|
-| **Context Parallelism (CP > 1)** | ❌ **Incompatible** | CP slices sequence dimension causing shape mismatches in per-token loss | Use Tensor Parallelism or FSDP instead |
 | **Liger Fused Linear Cross Entropy** | ❌ **Incompatible** | Skips logits materialization with `skip_logits=True` in training mode | Use `chunked_cross_entropy: true` instead (compatible, saves memory) |
 | **Knowledge Distillation (KD)** | ❌ **Incompatible** | KD's `compute_loss()` ignores `return_outputs=True` parameter | Use standard SFT training or disable Channel Loss |
 | **Cut Cross Entropy** | ⚠️ Auto-Disabled | Does not materialize logits to save memory | Plugin automatically disables CCE with warning |
+| **Sample Packing with micro_batch_size > 1** | ❌ **Incompatible** | Packing mode requires per-batch segment detection (only implemented for batch_size=1) | Set `micro_batch_size: 1` |
 
 ### ⚠️ Semantic Warnings
 
@@ -170,6 +170,25 @@ datasets:
 2. Disable Channel Loss for KD training
 3. Track GitHub issue for KD Trainer fix
 
+### Error: "Channel Loss does not support sample packing with micro_batch_size > 1"
+
+**Cause**: Packing mode requires per-batch segment boundary detection, currently only implemented for `micro_batch_size=1`.
+
+**Solutions**:
+1. **Recommended**: Set `micro_batch_size: 1` (standard for packing mode)
+   ```yaml
+   sample_packing: true
+   micro_batch_size: 1
+   ```
+
+2. Disable sample packing:
+   ```yaml
+   sample_packing: false
+   micro_batch_size: 2  # or higher
+   ```
+
+3. Disable Channel Loss if both packing and batch_size > 1 are critical
+
 ### Warning: "No logits available from compute_loss()"
 
 **Cause**: An incompatible optimization is enabled at runtime (e.g., custom trainer modification).
@@ -199,12 +218,6 @@ datasets:
 5. ✅ Check logs for "Channel Loss: Patched trainer.compute_loss" message
 6. ✅ Verify `logging_steps` is set appropriately
 
-### Metrics show NaN or Inf
-
-**Cause**: Context Parallel training may produce NaN/Inf at sequence boundaries.
-
-**Solution**: Already handled automatically. The plugin filters NaN/Inf values before accumulation.
-
 ## Advanced Usage
 
 ### With Sample Packing
@@ -213,9 +226,22 @@ Channel Loss automatically detects packed sequences:
 
 ```yaml
 sample_packing: true
+micro_batch_size: 1  # Required for packing mode
 enable_channel_loss: true
 channel_loss_segment: "auto"  # Prefers attention_mask, falls back to position_ids
 ```
+
+### With Context Parallelism
+
+Channel Loss supports Context Parallelism with CP-local shard-wise computation:
+
+```yaml
+context_parallel_size: 2  # or 4, 8, etc.
+micro_batch_size: 1  # Required when using CP
+enable_channel_loss: true
+```
+
+The plugin automatically detects CP and performs shard-wise statistics computation with segment boundary detection.
 
 ### With Distributed Training
 
@@ -259,7 +285,7 @@ enable_channel_loss: true
 
 ## Examples
 
-See `qlora-channel-loss.yaml` for a complete working example with:
+See `examples/channel-loss/qlora-channel-loss.yaml` for a complete working example with:
 - QLoRA 4-bit quantization
 - Sample packing
 - Multi-domain datasets
@@ -268,7 +294,10 @@ See `qlora-channel-loss.yaml` for a complete working example with:
 ## References
 
 - **Original Implementation**: [ms-swift Channel Loss](https://github.com/modelscope/swift)
-- **Compatibility Analysis**: `specs/007-channel-loss-compatibility/COMPATIBILITY_ANALYSIS.md`
+- **Compatibility Specifications**:
+  - Spec 012: Channel Loss Compatibility Verification
+  - Spec 013: Channel Loss Optimizations and Robustness
+  - Spec 015: Dataset Index-Based Channel Injection (In Progress)
 - **Source Code**: `src/axolotl/integrations/channel_loss/`
 
 ## Technical Details
@@ -280,8 +309,17 @@ See `qlora-channel-loss.yaml` for a complete working example with:
    - Extract channel info (side input, not passed to model)
    - Call original compute_loss with `return_outputs=True`
    - Compute per-token CE separately (detached, no gradient)
-   - Accumulate sum/count per channel locally
+   - Accumulate sum/count per channel locally (CP-local for Context Parallelism)
 3. **Logging Callback**: Synchronizes statistics across ranks and adds to logs
+
+### Context Parallelism Support
+
+When Context Parallelism (CP) is enabled:
+- Statistics are computed **CP-locally** on each shard
+- Segment boundaries are detected from `cu_seqlens` (from Ring Attention)
+- Token-space boundaries are mapped to loss-space via `cu_seqlens_token - 1`
+- No cross-CP communication required during forward pass (avoids collective overhead)
+- Statistics are synchronized at logging time only
 
 ### Gradient Safety
 
