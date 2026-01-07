@@ -71,7 +71,7 @@ Step 20: loss=2.234, loss_math=2.001, loss_code=2.456
 
 | Feature | Status | Why Not Recommended | Notes |
 |---------|--------|---------------------|-------|
-| **RL Training** (DPO/KTO/ORPO/SIMPO/GRPO) | ⚠️ **Not Recommended** | No practical use case | RL training optimizes sample-level preferences/rewards, not per-token loss. Channel Loss tracks token-level causal loss which is irrelevant to RL training objectives. Plugin will emit a warning but allow usage. |
+| **RL Training** (DPO/IPO/KTO/ORPO/SIMPO/GRPO) | ⚠️ **Not Recommended** | No practical use case | RL training optimizes sample-level preferences/rewards, not per-token loss. Channel Loss tracks token-level causal loss which is irrelevant to RL training objectives. Plugin will emit a warning but allow usage. |
 
 ## Configuration Options
 
@@ -202,7 +202,7 @@ datasets:
 
 ### Warning: "Channel Loss is NOT RECOMMENDED for RL training"
 
-**Cause**: You're using Channel Loss with DPO/KTO/ORPO/SIMPO/GRPO.
+**Cause**: You're using Channel Loss with DPO/IPO/KTO/ORPO/SIMPO/GRPO.
 
 **Why Not Recommended**: RL training optimizes sample-level preferences/rewards, not per-token loss. Channel Loss tracks token-level causal loss which is irrelevant to RL training objectives. The collected statistics will not reflect actual training progress.
 

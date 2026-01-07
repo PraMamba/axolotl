@@ -162,7 +162,7 @@ class ChannelLossPlugin(BasePlugin):
         # === Not Recommended: RL Training ===
         # Technically compatible but no practical use case
 
-        rl_types = ["dpo", "kto", "orpo", "simpo", "grpo"]
+        rl_types = ["dpo", "ipo", "kto", "orpo", "simpo", "grpo"]
         current_rl = cfg.get("rl")
         if current_rl and current_rl.lower() in rl_types:
             LOG.warning(
