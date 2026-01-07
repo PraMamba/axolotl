@@ -233,20 +233,28 @@ def create_ulysses_ring_groups(
         rp_group_ranks = [cp_ranks[i + k * sp_world_size] for k in range(rp_world_size)]
         rp_groups.append(rp_group_ranks)
 
+    # === Verification: Log expected group layout ===
+    LOG.info(f"Expected SP groups (row-major layout): {sp_groups}")
+    LOG.info(f"Expected RP groups (column-major layout): {rp_groups}")
+
     # Create actual PyTorch process groups
     # Find which groups this rank belongs to
     my_sp_group = None
     my_rp_group = None
+    my_sp_group_ranks = None
+    my_rp_group_ranks = None
 
     for sp_group_ranks in sp_groups:
         group = dist.new_group(sp_group_ranks)
         if cp_rank in sp_group_ranks:
             my_sp_group = group
+            my_sp_group_ranks = sp_group_ranks
 
     for rp_group_ranks in rp_groups:
         group = dist.new_group(rp_group_ranks)
         if cp_rank in rp_group_ranks:
             my_rp_group = group
+            my_rp_group_ranks = rp_group_ranks
 
     if my_sp_group is None or my_rp_group is None:
         raise RuntimeError(
@@ -258,5 +266,11 @@ def create_ulysses_ring_groups(
         f"Rank {global_rank} (cp_rank={cp_rank}): "
         f"sp_rank={sp_rank}/{sp_world_size}, rp_rank={rp_rank}/{rp_world_size}"
     )
+
+    # === Verification: Log actual group membership ===
+    if sp_rank == 0:
+        LOG.info(f"[CP Rank {cp_rank}] My SP group: {my_sp_group_ranks}")
+    if rp_rank == 0:
+        LOG.info(f"[CP Rank {cp_rank}] My RP group: {my_rp_group_ranks}")
 
     return my_sp_group, my_rp_group, sp_rank, rp_rank

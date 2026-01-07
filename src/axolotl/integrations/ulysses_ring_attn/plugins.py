@@ -71,6 +71,84 @@ class UlyssesRingAttentionPlugin(BasePlugin):
         """Return the pydantic config model for this plugin."""
         return "axolotl.integrations.ulysses_ring_attn.UlyssesRingAttentionArgs"
 
+    def _get_device_mesh(self, trainer, cfg):
+        """Extract device_mesh with fallback strategies.
+
+        Strategy 1: Direct attribute on trainer.model
+        Strategy 2: Wrapped model (FSDP, DDP, etc.) - trainer.model.module
+        Strategy 3: Create manually from context_parallel_size
+
+        Args:
+            trainer: The HF Trainer instance
+            cfg: Validated Axolotl configuration
+
+        Returns:
+            device_mesh: DeviceMesh instance
+
+        Raises:
+            ValueError: If all strategies fail
+        """
+        # Strategy 1: Direct attribute
+        device_mesh = getattr(trainer.model, "device_mesh", None)
+        if device_mesh is not None:
+            LOG.info("Found device_mesh on trainer.model")
+            return device_mesh
+
+        # Strategy 2: Wrapped model (FSDP, DDP, etc.)
+        if hasattr(trainer.model, "module"):
+            device_mesh = getattr(trainer.model.module, "device_mesh", None)
+            if device_mesh is not None:
+                LOG.info("Found device_mesh on trainer.model.module (wrapped model)")
+                return device_mesh
+
+        # Strategy 3: Create manually from CP group
+        LOG.warning(
+            "device_mesh not found on model, creating from "
+            "context_parallel_size. This is a fallback strategy and "
+            "may not work with all distributed setups."
+        )
+        return self._create_device_mesh_from_cp(cfg.context_parallel_size)
+
+    def _create_device_mesh_from_cp(self, context_parallel_size):
+        """Fallback: Create device_mesh from CP ranks.
+
+        Args:
+            context_parallel_size: Context parallel world size
+
+        Returns:
+            device_mesh: Manually created DeviceMesh instance
+
+        Raises:
+            ImportError: If torch.distributed.device_mesh not available
+        """
+        import torch
+        import torch.distributed as dist
+        from torch.distributed.device_mesh import DeviceMesh
+
+        # Get world info
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        # Assuming DeviceMesh shape: (dp, cp) where cp is innermost
+        # This matches Axolotl's default DeviceMesh layout
+        cp_rank = rank % context_parallel_size
+
+        # Build CP group ranks
+        cp_group_ranks = list(range(cp_rank, world_size, context_parallel_size))
+
+        # Create device_mesh with CP dimension
+        device_mesh = DeviceMesh(
+            "cuda",
+            torch.tensor(cp_group_ranks).reshape(1, -1),
+            mesh_dim_names=["batch", "context"],
+        )
+
+        LOG.info(
+            f"Created fallback device_mesh: shape={device_mesh.shape}, "
+            f"ranks={cp_group_ranks}, cp_rank={cp_rank}"
+        )
+        return device_mesh
+
     def register(self, cfg: dict):
         """Register plugin and validate configuration.
 
@@ -236,15 +314,8 @@ class UlyssesRingAttentionPlugin(BasePlugin):
 
         # === Step 3: Create process groups ===
 
-        # Get device_mesh from trainer
-        device_mesh = getattr(trainer.model, "device_mesh", None)
-        if device_mesh is None:
-            raise ValueError(
-                "UlyssesRingAttentionPlugin requires device_mesh to be set on the model.\n\n"
-                "This typically means context_parallel_size is configured but the model "
-                "was not properly initialized with DeviceMesh.\n\n"
-                "Ensure you're using Axolotl's distributed training setup with context parallelism."
-            )
+        # Get device_mesh from trainer (with fallback strategies)
+        device_mesh = self._get_device_mesh(trainer, cfg)
 
         LOG.info(f"Found device_mesh with dimensions: {device_mesh.mesh_dim_names}")
 
