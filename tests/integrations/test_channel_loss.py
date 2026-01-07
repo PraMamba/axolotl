@@ -1106,6 +1106,67 @@ class TestCompatibleFeatures:
         # Verify liger_cross_entropy is preserved
         assert cfg["liger_cross_entropy"] is True
 
+    def test_pretrain_integration(self):
+        """Test that Channel Loss works with Pretrain mode."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "pretraining_dataset": [
+                {
+                    "path": "path/to/pretrain_data.txt",
+                    "name": "pretrain",
+                    "type": "pretrain",
+                    "text_column": "text",
+                    "channel": "general",
+                }
+            ],
+            "datasets": [],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+        # Verify channel was extracted from pretraining_dataset
+        assert hasattr(plugin, "_dataset_channels")
+        assert plugin._dataset_channels == {0: "general"}
+        # Verify channel field was removed from config
+        assert "channel" not in cfg["pretraining_dataset"][0]
+
+    def test_pretrain_and_sft_mixed(self):
+        """Test that Channel Loss works with mixed pretrain + SFT datasets."""
+        from axolotl.integrations.channel_loss import ChannelLossPlugin
+
+        plugin = ChannelLossPlugin()
+        cfg = {
+            "enable_channel_loss": True,
+            "datasets": [
+                {"path": "sft_dataset.jsonl", "type": "alpaca", "channel": "sft_task"}
+            ],
+            "pretraining_dataset": [
+                {
+                    "path": "pretrain_data.txt",
+                    "type": "pretrain",
+                    "text_column": "text",
+                    "channel": "general",
+                }
+            ],
+        }
+
+        # Should register without errors
+        plugin.register(cfg)
+
+        # Verify channels extracted from both datasets and pretraining_dataset
+        assert hasattr(plugin, "_dataset_channels")
+        assert plugin._dataset_channels == {
+            0: "sft_task",  # First index from datasets
+            1: "general",  # Second index from pretraining_dataset
+        }
+        # Verify channel fields were removed
+        assert "channel" not in cfg["datasets"][0]
+        assert "channel" not in cfg["pretraining_dataset"][0]
+
 
 class TestRuntimeDetection:
     """Tests for runtime detection of missing logits."""

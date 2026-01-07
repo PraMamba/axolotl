@@ -178,6 +178,8 @@ class ChannelLossPlugin(BasePlugin):
         # This is necessary because SFTDataset schema doesn't have 'channel' field
         # and validate_config would discard it
         self._dataset_channels = {}
+
+        # Handle standard datasets
         for idx, ds in enumerate(cfg.get("datasets", [])):
             # Pop channel to avoid schema validation errors
             ch = ds.pop("channel", None)
@@ -185,6 +187,18 @@ class ChannelLossPlugin(BasePlugin):
                 # Store in plugin instance variable (survives validate_config)
                 # Will be used by collator to inject channel field at batch time
                 self._dataset_channels[idx] = ch
+
+        # Handle pretraining_dataset (pretrain mode uses a separate config field)
+        pretrain_datasets = cfg.get("pretraining_dataset", [])
+        if isinstance(pretrain_datasets, dict):
+            pretrain_datasets = [pretrain_datasets]
+
+        # Continue indexing from where standard datasets left off
+        base_idx = len(cfg.get("datasets", []))
+        for idx, ds in enumerate(pretrain_datasets):
+            ch = ds.pop("channel", None)
+            if ch is not None:
+                self._dataset_channels[base_idx + idx] = ch
 
         LOG.info(
             f"Channel Loss Plugin: Extracted channels from {len(self._dataset_channels)} datasets"
