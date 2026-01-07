@@ -794,8 +794,8 @@ class TestChannelLossWithContextParallelism:
 
         plugin = ChannelLossPlugin()
 
-        # Test each RL type
-        rl_types = ["dpo", "kto", "orpo", "simpo", "grpo"]
+        # Test each RL type (all preference optimization methods)
+        rl_types = ["dpo", "ipo", "kto", "orpo", "simpo", "grpo"]
 
         for rl_type in rl_types:
             caplog.clear()
@@ -811,7 +811,7 @@ class TestChannelLossWithContextParallelism:
 
             # Check warning was logged
             assert any(
-                "sample-level preference loss" in rec.message for rec in caplog.records
+                "sample-level preference" in rec.message for rec in caplog.records
             )
             assert any(rl_type.upper() in rec.message for rec in caplog.records)
 
