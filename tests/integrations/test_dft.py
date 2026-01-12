@@ -869,6 +869,71 @@ class MockTrainer:
 class TestDFTContextParallelCompatibility:
     """Test DFT compatibility with Context Parallelism after Phase 3 fix."""
 
+    def test_cp_group_detected_from_device_mesh(self):
+        """Regression test: CP is detected even without `context_parallel_group`.
+
+        In real training, axolotl's CP group can be derived from the Accelerator's
+        `torch_device_mesh` ("cp" dim), while `context_parallel_group` may be absent.
+        """
+        batch_size, full_seq_len, vocab_size = (2, 16, 100)
+        cp_size = 2
+        cp_rank = 0
+        divisor = min(cp_size, 64)
+        pad_len = (divisor - full_seq_len % divisor) % divisor
+        chunk_len = (full_seq_len + pad_len) // cp_size
+        logits_local = torch.randn(
+            batch_size, chunk_len, vocab_size, requires_grad=True
+        )
+        labels_full = torch.randint(0, vocab_size, (batch_size, full_seq_len))
+
+        class FakeSubmesh:
+            def __init__(self, group):
+                self._group = group
+
+            def get_group(self):
+                return self._group
+
+        class FakeDeviceMesh:
+            mesh_dim_names = ("cp",)
+
+            def __init__(self, group):
+                self._group = group
+
+            def __getitem__(self, key):
+                assert key == ("cp",)
+                return FakeSubmesh(self._group)
+
+        fake_group = object()
+        mock_trainer = SimpleNamespace(
+            accelerator=SimpleNamespace(
+                context_parallel_group=None,
+                torch_device_mesh=FakeDeviceMesh(fake_group),
+            )
+        )
+
+        import torch.distributed as dist
+
+        original_is_initialized = dist.is_initialized
+        original_get_world_size = dist.get_world_size
+        original_get_rank = dist.get_rank
+        dist.is_initialized = lambda: True
+        dist.get_world_size = lambda group=None: cp_size
+        dist.get_rank = lambda group=None: cp_rank
+        try:
+            per_token_loss, valid_mask = compute_per_token_cross_entropy(
+                logits_local,
+                labels_full,
+                ignore_index=-100,
+                shift_labels=True,
+                trainer=mock_trainer,
+            )
+            assert per_token_loss.numel() == batch_size * chunk_len
+            assert valid_mask.numel() == per_token_loss.numel()
+        finally:
+            dist.is_initialized = original_is_initialized
+            dist.get_world_size = original_get_world_size
+            dist.get_rank = original_get_rank
+
     def test_cp_aware_loss_computation_single_rank(self):
         """Test CP-aware loss with simulated CP environment for a single rank."""
         batch_size, full_seq_len, vocab_size = (2, 16, 100)

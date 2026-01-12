@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -16,15 +17,42 @@ LOG = get_logger(__name__)
 
 
 def _get_context_parallel_group(trainer):
-    """Get the context parallel group from the trainer."""
+    """Best-effort lookup for the context-parallel process group.
+
+    Axolotl's context parallelism (sequence parallelism) is implemented via the
+    ring-attention patch + a DeviceMesh-backed process group. Depending on the
+    accelerate/axolotl version, there may not be a stable attribute like
+    `accelerator.context_parallel_group`, so we probe a few likely locations.
+    """
+    if trainer is None:
+        return None
+
+    # Newer/alternate implementations may expose the group directly.
     try:
-        if hasattr(trainer, "accelerator") and hasattr(
-            trainer.accelerator, "context_parallel_group"
-        ):
-            return trainer.accelerator.context_parallel_group
-    except AttributeError:
+        accelerator = getattr(trainer, "accelerator", None)
+        if accelerator is not None:
+            cp_group = getattr(accelerator, "context_parallel_group", None)
+            if cp_group is not None:
+                return cp_group
+
+            # DeviceMesh-backed CP group (preferred when available).
+            device_mesh = getattr(accelerator, "torch_device_mesh", None)
+            mesh_dim_names = getattr(device_mesh, "mesh_dim_names", None)
+            if device_mesh is not None and mesh_dim_names and "cp" in mesh_dim_names:
+                try:
+                    return device_mesh[("cp",)].get_group()
+                except Exception:
+                    pass
+    except Exception:
         pass
-    return None
+
+    # Fallback: ring-attention module stores the CP process group globally.
+    try:
+        from axolotl.monkeypatch.ring_attn import get_ring_attn_group
+
+        return get_ring_attn_group()
+    except Exception:
+        return None
 
 
 def compute_per_token_cross_entropy(
@@ -63,6 +91,8 @@ def compute_per_token_cross_entropy(
     batch_size, label_seq_len = labels.shape
     logits_seq_len = logits.size(1)
 
+    dft_debug = os.environ.get("AXOLOTL_DFT_DEBUG", "").lower() in ("1", "true", "yes")
+
     # Detect CP environment
     cp_group = _get_context_parallel_group(trainer) if trainer is not None else None
     cp_enabled = cp_group is not None and dist.is_initialized()
@@ -71,6 +101,9 @@ def compute_per_token_cross_entropy(
 
     # Detect whether logits are CP-local (post-hook gather disabled) or already gathered
     is_cp_local_logits = False
+    divisor = None
+    pad_len = None
+    expected_chunk_len = None
     if cp_size > 1:
         # CP pads to divisor (min(cp_size, 64)) for Ring-Flash-Attention
         divisor = min(cp_size, 64)
@@ -134,16 +167,6 @@ def compute_per_token_cross_entropy(
                             device=labels.device,
                         )
                         shift_labels = torch.cat([shift_labels, pad], dim=1)
-
-            # Verify alignment
-            if shift_logits.size(1) != shift_labels.size(1):
-                LOG.warning(
-                    f"[DFT CP] Misalignment: shift_logits.shape={tuple(shift_logits.shape)}, "
-                    f"shift_labels.shape={tuple(shift_labels.shape)} (cp_rank={cp_rank})"
-                )
-                min_len = min(shift_logits.size(1), shift_labels.size(1))
-                shift_logits = shift_logits[:, :min_len, :].contiguous()
-                shift_labels = shift_labels[:, :min_len].contiguous()
         else:
             # Non-CP or CP-gathered path: standard causal shift
             shift_logits = logits[..., :-1, :].contiguous()
@@ -154,6 +177,26 @@ def compute_per_token_cross_entropy(
 
     shift_logits = shift_logits.float()
     shift_labels = shift_labels.to(shift_logits.device)
+
+    # Fail-fast (default) for any remaining mismatch; truncation is only allowed under
+    # explicit debug mode to aid diagnosis without crashing training immediately.
+    if shift_logits.size(1) != shift_labels.size(1):
+        msg = (
+            "DFT loss alignment error: logits/labels sequence lengths do not match after "
+            f"shifting (shift_logits={tuple(shift_logits.shape)}, shift_labels={tuple(shift_labels.shape)}). "
+            f"cp_enabled={cp_enabled}, cp_size={cp_size}, cp_rank={cp_rank}, is_cp_local_logits={is_cp_local_logits}, "
+            f"logits_seq_len={logits_seq_len}, label_seq_len={label_seq_len}, "
+            f"divisor={divisor}, pad_len={pad_len}, expected_chunk_len={expected_chunk_len}. "
+            "This usually indicates Context Parallelism (CP/SP) is enabled but labels were not aligned to CP-local logits. "
+            "Set AXOLOTL_DFT_DEBUG=1 to allow truncation for debugging."
+        )
+        if not dft_debug:
+            raise ValueError(msg)
+
+        LOG.warning("%s", msg)
+        min_seq_len = min(shift_logits.size(1), shift_labels.size(1))
+        shift_logits = shift_logits[:, :min_seq_len, :].contiguous()
+        shift_labels = shift_labels[:, :min_seq_len].contiguous()
 
     # Flatten tensors for loss computation
     logits_flat = shift_logits.view(-1, shift_logits.size(-1))
@@ -305,4 +348,3 @@ def compute_dft_loss_with_intermediate(
         num_items_in_batch=num_items_in_batch,
     )
     return scalar_loss, per_token_loss, valid_mask
-
