@@ -41,6 +41,10 @@ Where:
 Add to your axolotl config YAML:
 
 ```yaml
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 # Enable DFT
 enable_dft_loss: true
 
@@ -53,6 +57,10 @@ enable_dft_loss: true
 # Typical SFT config with DFT
 model_type: llama
 base_model: meta-llama/Llama-2-7b-hf
+
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
 
 # Data
 datasets:
@@ -81,6 +89,10 @@ For models with >50K vocab, use chunked cross-entropy to reduce memory:
 ```yaml
 model_type: qwen2
 base_model: Qwen/Qwen2.5-72B
+
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
 
 enable_dft_loss: true
 dft_chunk_size: 8192  # Memory optimization for 152K vocab
@@ -154,6 +166,10 @@ See **[Decision Tree: When to Use DFT](./DFT_COMPATIBILITY.md#decision-tree-when
 model_type: llama
 base_model: meta-llama/Llama-2-7b-hf
 
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 datasets:
   - path: your/dataset
     type: sharegpt
@@ -187,6 +203,10 @@ warmup_steps: 100
 model_type: llama
 base_model: meta-llama/Llama-2-70b-hf
 
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 # FSDP for model sharding
 fsdp:
   - full_shard
@@ -215,6 +235,10 @@ gradient_checkpointing: true
 model_type: qwen2
 base_model: Qwen/Qwen2.5-72B
 
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 # Tensor Parallelism for large model
 tensor_parallel_size: 4
 
@@ -237,6 +261,10 @@ gradient_checkpointing: true
 ```yaml
 model_type: llama
 base_model: meta-llama/Llama-2-7b-hf
+
+# Register DFT plugin
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
 
 sequence_len: 32768
 
@@ -309,6 +337,9 @@ This creates an automatic curriculum that focuses on the "Goldilocks zone" of di
 DFT can provide per-token losses and valid masks for integration with Channel Loss plugin:
 
 ```yaml
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 enable_dft_loss: true
 enable_dft_channel_loss: true  # Expose intermediates
 ```
@@ -325,6 +356,9 @@ See `CHANNEL_LOSS_INTEGRATION.md` for details.
 Track token counts during training:
 
 ```yaml
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 enable_dft_loss: true
 include_tkps: true
 ```
@@ -348,6 +382,9 @@ Useful for:
 
 **Solution**: Remove or set to 0
 ```yaml
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 enable_dft_loss: true
 label_smoothing_factor: 0  # or remove this line
 ```
@@ -358,6 +395,9 @@ label_smoothing_factor: 0  # or remove this line
 
 **Solution 1**: Enable chunked CE
 ```yaml
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 enable_dft_loss: true
 dft_chunk_size: 8192  # Adjust based on vocab size and VRAM
 ```
@@ -377,6 +417,9 @@ enable_dft_loss: false
 **Solution**: Choose one
 ```yaml
 # Option 1: Use DFT
+plugins:
+  - axolotl.integrations.dft.DFTPlugin
+
 enable_dft_loss: true
 # Remove: orpo_alpha
 
