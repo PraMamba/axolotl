@@ -54,24 +54,39 @@ def patch_compute_loss_for_dft(trainer, cfg) -> None:
                 num_items_in_batch=num_items_in_batch,
             )
 
-        if getattr(trainer.args, "include_tkps", False):
+        # Track tokens for throughput calculation (tokens per second)
+        # IMPORTANT: Must use state.tokens dict to match base trainer's logging expectations
+        if getattr(trainer.args, "include_tkps", False) and model.training:
             inputs_key = "labels" if "labels" in inputs else "input_ids"
-            num_tokens = (inputs[inputs_key] != -100).sum()
+            trainable_tokens = (inputs[inputs_key] != -100).sum()
+            total_tokens = torch.tensor(
+                inputs[inputs_key].numel(),
+                dtype=torch.long,
+                device=inputs[inputs_key].device,
+            )
+
             if is_distributed():
                 torch.distributed.all_reduce(
-                    num_tokens, op=torch.distributed.ReduceOp.SUM
+                    trainable_tokens, op=torch.distributed.ReduceOp.SUM
+                )
+                torch.distributed.all_reduce(
+                    total_tokens, op=torch.distributed.ReduceOp.SUM
                 )
 
-            local_tokens = (inputs[inputs_key] != -100).sum().cpu()
-            if hasattr(trainer.state, "num_tokens"):
-                trainer.state.num_tokens = trainer.state.num_tokens + local_tokens
-            else:
-                trainer.state.num_tokens = local_tokens
+            # Initialize state.tokens dict if not exists (matches base trainer structure)
+            if not hasattr(trainer.state, "tokens"):
+                trainer.state.tokens = {
+                    "trainable": torch.zeros(1),
+                    "total": torch.zeros(1),
+                }
 
-            if hasattr(trainer.state, "total_tokens"):
-                trainer.state.total_tokens += num_tokens
-            else:
-                trainer.state.total_tokens = num_tokens
+            # Accumulate tokens (matches base trainer logic in base.py:379-384)
+            trainer.state.tokens["trainable"] = (
+                trainer.state.tokens["trainable"] + trainable_tokens.detach().cpu()
+            )
+            trainer.state.tokens["total"] = trainer.state.tokens["total"] + total_tokens.cpu()
+            # Store per-step trainable tokens for throughput calculation
+            trainer.state.tokens["trainable_tokens"] = trainable_tokens.detach().cpu()
 
         forward_inputs = dict(inputs)
         labels = forward_inputs.pop("labels")
