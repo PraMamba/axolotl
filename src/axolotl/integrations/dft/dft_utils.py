@@ -112,7 +112,7 @@ def compute_per_token_cross_entropy(
         is_cp_local_logits = logits_seq_len == expected_chunk_len
 
         if dist.is_initialized():
-            LOG.info(
+            LOG.debug(
                 f"[DFT CP] Rank {dist.get_rank()}: logits_seq_len={logits_seq_len}, "
                 f"label_seq_len={label_seq_len}, expected_chunk_len={expected_chunk_len}, "
                 f"is_cp_local={is_cp_local_logits}, cp_rank={cp_rank}/{cp_size}"
