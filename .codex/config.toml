@@ -1,0 +1,79 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+# Project-scoped Codex configuration for migrated Axolotl workflows.
+# Codex loads this project configuration when the project is trusted.
+
+[agents]
+max_threads = 6
+max_depth = 1
+
+[agents.code_verifier]
+description = "Code verification agent. Use when relevant after code changes to run formatting, linting, and tests."
+config_file = "agents/code-verifier.toml"
+
+[agents.config_schema_expert]
+description = "Configuration and schema expert. Use when dealing with Pydantic config schemas, DictDefault, config validation, normalization, or YAML config structure."
+config_file = "agents/config-schema-expert.toml"
+
+[agents.data_processing_expert]
+description = "Data processing expert. Use when dealing with prompt strategies, dataset loading, tokenization, data collators, sample packing, or multimodal processing."
+config_file = "agents/data-processing-expert.toml"
+
+[agents.model_loading_expert]
+description = "Model loading and patching expert. Use when dealing with ModelLoader, PatchManager, adapter loading (LoRA/QLoRA), quantization, or model initialization."
+config_file = "agents/model-loading-expert.toml"
+
+[agents.monkeypatch_expert]
+description = "Monkeypatch system expert. Use when dealing with runtime patches, attention patches, model-specific patches, FSDP patches, or PatchManager lifecycle."
+config_file = "agents/monkeypatch-expert.toml"
+
+[agents.implementation_planner]
+description = "Implementation planner for complex tasks. Use when relevant before multi-file changes, new features, or architectural decisions."
+config_file = "agents/implementation-planner.toml"
+
+[agents.plugin_integration_expert]
+description = "Plugin system and integration expert. Use when dealing with BasePlugin, PluginManager, creating new integrations, or plugin lifecycle hooks."
+config_file = "agents/plugin-integration-expert.toml"
+
+[agents.simple_code_reviewer]
+description = "Lightweight code reviewer for quick quality checks. Use when relevant after code changes to catch common issues."
+config_file = "agents/simple-code-reviewer.toml"
+
+[agents.training_expert]
+description = "Training and RL algorithm expert. Use when dealing with trainers, builders, training args, DPO, GRPO, KTO, ORPO, EBFT, reward modeling, or training orchestration."
+config_file = "agents/training-expert.toml"
+
+[[skills.config]]
+path = "skills/add-integration"
+enabled = true
+
+[[skills.config]]
+path = "skills/add-model-support"
+enabled = true
+
+[[skills.config]]
+path = "skills/add-prompt-strategy"
+enabled = true
+
+[[skills.config]]
+path = "skills/add-trainer"
+enabled = true
+
+[[skills.config]]
+path = "skills/add-unit-tests"
+enabled = true
+
+[[skills.config]]
+path = "skills/create-pr"
+enabled = true
+
+[[skills.config]]
+path = "skills/debug-training"
+enabled = true
+
+[[skills.config]]
+path = "skills/gen-commit-msg"
+enabled = true
+
+[[skills.config]]
+path = "skills/review-pr"
+enabled = true

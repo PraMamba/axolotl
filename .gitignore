@@ -194,3 +194,4 @@ out/
 
 # scm auto-versioning
 src/axolotl/_version.py
+.omx/
